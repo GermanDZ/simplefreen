@@ -83,15 +83,20 @@ module Simplefreen
       @queue_mutex.synchronize do
         return :already_active if @active_key == profile_key
         return :already_queued if @queue.any? { |j| j.profile_key == profile_key }
+        # Mark `queued` BEFORE the job becomes visible to the worker. Written
+        # after, it raced a fast job (freentonic degraded → instant `error`,
+        # or an invoke-setup failure): the worker's final state landed first
+        # and this write overwrote it, leaving the profile `queued` forever
+        # with nothing in the queue.
+        @feature.state_store.update(profile_key) do |state|
+          next :abort if state["state"] == "running"
+          state.merge("state" => "queued", "last_error" => nil)
+        end
         @queue << Job.new(profile_key: profile_key, headed: headed,
                           trigger: trigger, vnc_password: vnc_password,
                           interactive: interactive, lookback: lookback,
                           recording: recording)
         @queue_cv.signal
-      end
-      @feature.state_store.update(profile_key) do |state|
-        next :abort if state["state"] == "running"
-        state.merge("state" => "queued", "last_error" => nil)
       end
       :enqueued
     end

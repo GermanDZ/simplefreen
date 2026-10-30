@@ -56,6 +56,13 @@ work. Cross-repo: the Browse-mode admin button requires the
   probe and watchdog sat in the buffer until it filled or the process
   exited (they all appeared at once on shutdown). `bin/simplefreen` now
   sets `$stdout.sync = true`.
+- **A profile no longer gets stuck in `queued` after a fast job (R-M3).**
+  `Scheduler#enqueue` wrote the `queued` state *after* making the job
+  visible to the worker. A job that finished instantly (freentonic
+  degraded, or an invoke-setup error) had its `error` overwritten by that
+  late write, leaving the profile `queued` with nothing in the queue. The
+  `queued` write now happens before the job is enqueued. This was also
+  the source of intermittent scheduler-test failures.
 
 ### Fixed (reliability + security review 2026-07-04)
 

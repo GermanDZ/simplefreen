@@ -134,7 +134,10 @@ module Simplefreen
       @scheduler.start
       @scheduler.enqueue("acme")
       wait_until { @feature.state_store.read("acme")["state"] == "needs_reauth" }
-      entries = @feature.run_log.recent("acme")
+      # finalize_failure writes the state before the run-log entry, so wait
+      # for the entry itself rather than reading it the moment state flips.
+      entries = nil
+      wait_until { (entries = @feature.run_log.recent("acme")).any? }
       assert_equal "needs_reauth", entries.first["outcome"]
     end
 
@@ -248,6 +251,30 @@ module Simplefreen
       wait_until { @feature.state_store.read("acme")["state"] == "error" }
       assert_equal 0, @client.invocations.size
       assert_match(/degraded/i, @feature.state_store.read("acme")["last_error"])
+    end
+
+    def test_fast_job_result_is_not_overwritten_by_queued
+      # R-M3. A job that finishes instantly (here: freentonic degraded) must
+      # not have its final state clobbered by enqueue's own `queued` write.
+      # Slow down only the enqueuing thread's state write so, if that write
+      # still happened after the job became visible, the worker would win.
+      health_stub = Object.new
+      def health_stub.state; :degraded; end
+      def health_stub.active?; false; end
+      @feature.install_freentonic_health(health_stub)
+
+      enqueuer = Thread.current
+      store = @feature.state_store
+      store.define_singleton_method(:update) do |key, &blk|
+        sleep 0.3 if Thread.current == enqueuer
+        super(key, &blk)
+      end
+
+      @scheduler.start
+      @scheduler.enqueue("acme")
+      wait_until { @feature.state_store.read("acme")["state"] == "error" }
+      sleep 0.5 # past the slowed write: it must not land on top of `error`
+      assert_equal "error", @feature.state_store.read("acme")["state"]
     end
 
     def test_recover_on_boot_resets_queued_and_running
