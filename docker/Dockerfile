@@ -1,7 +1,11 @@
 # Simplefreen — SimpleFIN bridge that drives freentonic over HTTP.
 # Slim Ruby base. No Chrome / Xvfb / VNC / browser tooling — all of
 # that lives in the freentonic image.
-FROM ruby:3.2-slim-bookworm
+#
+# Pinned to an exact patch so a stale cached base can't slip into a
+# build and upgrades show up as a diff. Bump for Ruby/Debian security
+# releases.
+FROM ruby:3.4.12-slim-trixie
 
 # tini as pid 1 for clean signal forwarding.
 RUN apt-get update -qq \

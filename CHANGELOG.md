@@ -25,6 +25,10 @@ work. Cross-repo: the Browse-mode admin button requires the
 
 ### Security
 
+- **Container base moved off end-of-life Ruby 3.2.** `docker/Dockerfile`
+  now builds on `ruby:3.4.12-slim-trixie` (Ruby 3.4, Debian 13), pinned
+  to the exact patch so upgrades are explicit. Ruby 3.2 stopped receiving
+  security fixes in 2026-03.
 - **Admin CSRF gate no longer trusts CORS origins.** A cookie-authenticated
   admin mutation must now carry an `Origin`/`Referer` matching
   `SIMPLEFREEN_PUBLIC_URL` only. Previously any origin listed in
