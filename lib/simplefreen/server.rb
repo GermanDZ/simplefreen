@@ -21,11 +21,15 @@ module Simplefreen
     DEFAULT_ADDR = "0.0.0.0"
     DEFAULT_PORT = 7878
 
-    # Default 64 MiB. A full-history scrape (~10 years, thousands of
-    # transactions across multiple banks) can run several MiB once
-    # canonical-shaped, and admin endpoints are auth-gated, so a generous
-    # default is fine. Override with SIMPLEFREEN_MAX_BODY_MB.
+    # Default 64 MiB, granted ONLY to a freentonic push that presents a
+    # live push token for its run (see #body_limit_for): a full-history
+    # scrape (~10 years, thousands of transactions across multiple banks)
+    # can run several MiB once canonical-shaped. Override with
+    # SIMPLEFREEN_MAX_BODY_MB.
     MAX_BODY_BYTES = (Integer(ENV["SIMPLEFREEN_MAX_BODY_MB"] || 64)) * 1024 * 1024
+    # Every other request is buffered before any auth check runs, so it
+    # gets a small cap. Admin JSON bodies and the login form are a few KiB.
+    MAX_PREAUTH_BODY_BYTES = 1024 * 1024
     MAX_HEADER_BYTES = 16 * 1024
     READ_TIMEOUT     = 30
 
@@ -295,10 +299,26 @@ module Simplefreen
       end
 
       length = parse_content_length(headers["content-length"])
-      raise RequestTooLarge if length > MAX_BODY_BYTES
+      raise RequestTooLarge if length > body_limit_for(method, path, headers)
 
       body = length.positive? ? reader.read_exactly(length) : ""
       Request.new(method: method, path: path, headers: headers, body: body)
+    end
+
+    # Decided from the request line + headers alone, before any body bytes
+    # are buffered, so an unauthenticated client can't make us hold
+    # MAX_BODY_BYTES per connection. The token is only checked here, not
+    # consumed — PushReceiver still burns it before accepting the payload.
+    def body_limit_for(method, path, headers)
+      return MAX_PREAUTH_BODY_BYTES unless method == "POST"
+      match = path.split("?", 2).first.match(%r{\A/push/([^/]+)\z})
+      return MAX_PREAUTH_BODY_BYTES unless match
+
+      token  = Http.bearer_token(headers["authorization"])
+      tokens = @router.respond_to?(:feature) ? @router.feature&.push_tokens : nil
+      return MAX_PREAUTH_BODY_BYTES unless token && tokens&.valid?(match[1], token)
+
+      MAX_BODY_BYTES
     end
 
     def parse_content_length(raw)

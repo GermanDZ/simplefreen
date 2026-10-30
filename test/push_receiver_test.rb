@@ -370,5 +370,50 @@ module Simplefreen
       assert_equal "422", res.code
       refute @feature.cache_store.exists?("acme")
     end
+
+    # ── Body-size cap is decided before the body is read ──────
+
+    # Sends only the request head, announcing a body that never arrives.
+    # A 413 here proves the server rejected the size from headers alone,
+    # without buffering anything.
+    def head_only_status(path, content_length:, token: nil)
+      sock = TCPSocket.new("127.0.0.1", @port)
+      head = +"POST #{path} HTTP/1.1\r\nHost: x\r\nContent-Length: #{content_length}\r\n"
+      head << "Authorization: Bearer #{token}\r\n" if token
+      sock.write(head << "\r\n")
+      sock.gets.to_s[/\AHTTP\/1\.1 (\d{3})/, 1]
+    ensure
+      sock&.close
+    end
+
+    def test_large_body_without_valid_push_token_is_refused_before_reading
+      big = Server::MAX_PREAUTH_BODY_BYTES * 2
+      assert_equal "413", head_only_status("/push/simplefreen-acme-big", content_length: big)
+      assert_equal "413", head_only_status("/push/simplefreen-acme-big", content_length: big,
+                                           token: "forged")
+      assert_equal "413", head_only_status("/admin/login", content_length: big)
+    end
+
+    def test_large_push_with_valid_token_is_accepted
+      run_id = "simplefreen-acme-big"
+      token  = @tokens.mint(run_id)
+      @feature.install_scheduler(ActiveJobStub.new(profile_key: "acme", run_id: run_id))
+
+      payload = payload_for("acc_1111111111111111")
+      payload["meta"] = { "pad" => "x" * (Server::MAX_PREAUTH_BODY_BYTES + 1) }
+      res = post("/push/#{run_id}", payload, token: token)
+      assert_equal "200", res.code
+    end
+
+    def test_large_push_token_check_does_not_consume_token
+      # A token for one run must not unlock the large cap for another, and
+      # the header-time check must leave the token for the receiver.
+      run_id = "simplefreen-acme-big"
+      token  = @tokens.mint(run_id)
+      big    = Server::MAX_PREAUTH_BODY_BYTES * 2
+      assert_equal "413", head_only_status("/push/simplefreen-acme-other", content_length: big,
+                                           token: token)
+      assert @tokens.valid?(run_id, token)
+    end
   end
 end

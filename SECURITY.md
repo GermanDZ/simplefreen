@@ -40,7 +40,9 @@ your change breaks one, it is a security bug and should not merge.
    emulator → freentonic → emulator handshake uses a fresh 32-byte
    URL-safe token for each sync. The mint-table stores SHA-256
    hashes (not plaintext). `PushTokens#consume` deletes the entry
-   immediately on a valid match.
+   immediately on a valid match. `PushTokens#valid?` performs the same
+   check without consuming; the server uses it only to pick a body-size
+   cap, and the receiver still consumes before accepting a payload.
 5. **Access URLs hash their passwords with PBKDF2-HMAC-SHA256**
    (600k iterations, 16-byte salt). Verification is constant-time.
 6. **No plaintext credentials on argv.** When passing to freentonic
@@ -57,6 +59,15 @@ your change breaks one, it is a security bug and should not merge.
 9. **Reserved profile keys** (`claim`, `accounts`, `admin`, `api`,
    `p`, `status`, `healthz`, `invoke`, `runs`, `profiles`) are rejected
    at create time to foreclose URL routing ambiguity.
+10. **Request bodies are capped before auth.** Every request body is
+    buffered before any auth check runs, so the server caps it at 1 MiB
+    (`Server::MAX_PREAUTH_BODY_BYTES`). Only a `POST /push/<run_id>`
+    whose bearer is a live push token for that run gets the large cap
+    (`SIMPLEFREEN_MAX_BODY_MB`, default 64). `Server#body_limit_for`
+    decides from headers alone, before any body bytes are read.
+11. **The noVNC password travels in the URL fragment** (`vnc.html#…
+    password=…`). Browsers never send the fragment to a server, so the
+    password stays out of proxy access logs and `Referer` headers.
 
 ## What an operator must protect
 

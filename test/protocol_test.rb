@@ -177,7 +177,11 @@ module Simplefreen
       body = JSON.parse(res.body)
       assert_equal true, body["headed"]
       assert_match(/\A[A-Za-z0-9]{8}\z/, body["vnc_password"])
-      assert_includes body["vnc_url"], body["vnc_password"]
+      # The password rides in the fragment, which browsers never send to
+      # a server, so it can't land in proxy access logs or Referer.
+      before_fragment, fragment = body["vnc_url"].split("#", 2)
+      refute_includes before_fragment, body["vnc_password"]
+      assert_includes fragment, "password=#{body["vnc_password"]}"
     end
 
     def test_admin_sync_returns_vnc_password_and_url_for_every_run
@@ -190,7 +194,7 @@ module Simplefreen
                 body: { headed: false }, headers: admin)
       body = JSON.parse(res.body)
       assert_match(/\A[A-Za-z0-9]{8}\z/, body["vnc_password"])
-      assert_match(%r{/novnc/vnc\.html\?path=novnc/websockify}, body["vnc_url"])
+      assert_match(%r{/novnc/vnc\.html#path=novnc/websockify}, body["vnc_url"])
     end
 
     def test_admin_sync_without_credentials_rejected_with_clear_message

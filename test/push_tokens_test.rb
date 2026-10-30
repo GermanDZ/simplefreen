@@ -63,5 +63,24 @@ module Simplefreen
       @table.discard_for_run("run_1")
       assert_nil @table.consume("run_1", token)
     end
+
+    def test_valid_does_not_consume
+      token = @table.mint("run_1")
+      assert @table.valid?("run_1", token)
+      assert @table.valid?("run_1", token), "valid? must be repeatable"
+      assert_equal "run_1", @table.consume("run_1", token), "token still consumable"
+      refute @table.valid?("run_1", token), "consumed token is no longer valid"
+    end
+
+    def test_valid_applies_consume_rules
+      token = @table.mint("run_1")
+      refute @table.valid?("other", token)
+      refute @table.valid?("run_1", "fake-bearer")
+      refute @table.valid?("run_1", nil)
+      refute @table.valid?("run_1", "")
+      expired = @table.mint("run_2", ttl_seconds: 0)
+      sleep 0.05
+      refute @table.valid?("run_2", expired)
+    end
   end
 end

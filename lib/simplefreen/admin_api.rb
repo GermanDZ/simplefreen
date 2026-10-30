@@ -556,7 +556,14 @@ module Simplefreen
       # that survives every noVNC release.
       # `reconnect=true` retries a flapping WebSocket instead of
       # falling back to the manual Connect screen.
-      "#{@feature.public_url}/novnc/vnc.html?path=novnc/websockify&password=#{URI.encode_www_form_component(password)}&autoconnect=true&reconnect=true&resize=scale&show_dot=1"
+      #
+      # All parameters go in the URL FRAGMENT, not the query string: a
+      # fragment is never sent to a server, so the VNC password stays
+      # out of edge-proxy access logs and Referer headers. noVNC reads
+      # settings via WebUtil.getConfigVar, which checks the fragment
+      # first and falls back to the query (verified for v1.5.0, the
+      # version freentonic pins).
+      "#{@feature.public_url}/novnc/vnc.html#path=novnc/websockify&password=#{URI.encode_www_form_component(password)}&autoconnect=true&reconnect=true&resize=scale&show_dot=1"
     end
 
     def handle_setup_token(client, key, method)

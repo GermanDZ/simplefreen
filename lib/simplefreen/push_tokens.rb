@@ -52,18 +52,21 @@ module Simplefreen
       return nil if token.nil? || token.empty?
       hash = OpenSSL::Digest::SHA256.hexdigest(token)
       @mutex.synchronize do
-        entry = @by_hash[hash]
+        entry = live_entry_locked(hash, run_id)
         return nil if entry.nil?
-        if entry.expires_at < Time.now.to_f
-          @by_hash.delete(hash)
-          return nil
-        end
-        if !Crypto.secure_compare(entry.run_id, run_id.to_s)
-          return nil
-        end
         @by_hash.delete(hash)
         entry.run_id
       end
+    end
+
+    # Non-consuming check with the same rules as `consume`. Used by the
+    # Server to decide, from headers alone, whether a /push body may use
+    # the large size cap. Never a substitute for `consume`: the receiver
+    # still burns the token before accepting the payload.
+    def valid?(run_id, token)
+      return false if token.nil? || token.empty?
+      hash = OpenSSL::Digest::SHA256.hexdigest(token)
+      @mutex.synchronize { !live_entry_locked(hash, run_id).nil? }
     end
 
     # Remove entries for a run_id (when /invoke returns non-zero before
@@ -84,6 +87,19 @@ module Simplefreen
     end
 
     private
+
+    # The entry for `hash` if it is unexpired and scoped to `run_id`;
+    # nil otherwise. Drops the entry when it has expired.
+    def live_entry_locked(hash, run_id)
+      entry = @by_hash[hash]
+      return nil if entry.nil?
+      if entry.expires_at < Time.now.to_f
+        @by_hash.delete(hash)
+        return nil
+      end
+      return nil unless Crypto.secure_compare(entry.run_id, run_id.to_s)
+      entry
+    end
 
     def prune_expired_locked
       now = Time.now.to_f

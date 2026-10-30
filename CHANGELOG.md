@@ -31,6 +31,19 @@ work. Cross-repo: the Browse-mode admin button requires the
   `SIMPLEFREEN_CORS_ALLOWED_ORIGINS` (meant for `/simplefin/*` reads) also
   passed, so an XSS on such an app could drive the admin API with the
   operator's session. No effect when the CORS list is empty (the default).
+- **Unauthenticated requests can no longer make the server buffer 64 MiB.**
+  The body cap is now chosen from the request headers before any body
+  bytes are read: 1 MiB for everything except a `POST /push/<run_id>`
+  carrying a live push token for that run, which keeps the
+  `SIMPLEFREEN_MAX_BODY_MB` cap (default 64). New `PushTokens#valid?`
+  checks a token without consuming it; one-shot consume in the receiver
+  is unchanged.
+- **The noVNC password no longer appears in the URL query string.** The
+  `vnc_url` the admin API returns now carries its noVNC settings,
+  including the password, in the URL fragment (`vnc.html#…`). Browsers
+  never send the fragment, so it can't land in edge-proxy access logs or
+  `Referer` headers. Requires a noVNC that reads fragment settings
+  (`WebUtil.getConfigVar`); v1.5.0, which freentonic pins, does.
 
 ### Fixed (reliability + security review 2026-07-04)
 

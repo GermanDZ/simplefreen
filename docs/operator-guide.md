@@ -523,7 +523,8 @@ simplefreen.example.com {
 - `reverse_proxy` to `http://…:80` forwards the client `Host`, which is
   what kamal-proxy routes on — no `header_up Host` override needed.
 - `handle_path /novnc/*` strips the prefix, matching how simplefreen
-  builds the URL (`{public_url}/novnc/vnc.html?path=novnc/websockify…`).
+  builds the URL (`{public_url}/novnc/vnc.html#path=novnc/websockify…`;
+  settings ride in the fragment so the VNC password never reaches proxy logs).
   WebSocket upgrades are handled automatically.
 - Keep the source-IP allowlist: the noVNC password is the only other
   guard on that surface.
