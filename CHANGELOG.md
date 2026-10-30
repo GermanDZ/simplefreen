@@ -23,6 +23,15 @@ work. Cross-repo: the Browse-mode admin button requires the
   host). Export them from a gitignored `.envrc`. The `ops/reimport`
   Phase A full-canonical script likewise requires `SOURCES`.
 
+### Security
+
+- **Admin CSRF gate no longer trusts CORS origins.** A cookie-authenticated
+  admin mutation must now carry an `Origin`/`Referer` matching
+  `SIMPLEFREEN_PUBLIC_URL` only. Previously any origin listed in
+  `SIMPLEFREEN_CORS_ALLOWED_ORIGINS` (meant for `/simplefin/*` reads) also
+  passed, so an XSS on such an app could drive the admin API with the
+  operator's session. No effect when the CORS list is empty (the default).
+
 ### Fixed (reliability + security review 2026-07-04)
 
 - **Scheduler worker no longer dies on an unexpected exception.** A

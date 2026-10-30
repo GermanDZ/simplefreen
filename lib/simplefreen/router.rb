@@ -83,11 +83,12 @@ module Simplefreen
     end
 
     # A browser sets Origin on every non-GET fetch, so for a mutation we can
-    # require it to match our own public URL (or a configured CORS origin).
+    # require it to match our own public URL. Deliberately NOT the CORS
+    # allowlist: those origins are trusted to read /simplefin/*, not to
+    # drive the admin API with the operator's session cookie.
     # Fall back to Referer for the rare browser/proxy that strips Origin.
     def same_origin?(request)
-      allowed = [@feature.public_url, *@feature.cors_allowed_origins]
-        .compact.map { |o| o.sub(/\/+\z/, "") }
+      allowed = [@feature.public_url].compact.map { |o| o.sub(/\/+\z/, "") }
 
       origin = request.headers["origin"].to_s.sub(/\/+\z/, "")
       unless origin.empty?

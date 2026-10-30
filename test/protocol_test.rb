@@ -523,6 +523,16 @@ module Simplefreen
       assert_equal "200", res.code
     end
 
+    def test_cookie_mutation_from_cors_allowed_origin_is_refused
+      # CORS origins may read /simplefin/*; they must not pass the admin
+      # CSRF gate with the operator's session cookie.
+      @feature.define_singleton_method(:cors_allowed_origins) { ["https://actual.example.com"] }
+      cookie = login_cookie
+      res = req("POST", "/admin/api/sync-all",
+                headers: { "Cookie" => cookie, "Origin" => "https://actual.example.com" })
+      assert_equal "403", res.code
+    end
+
     def test_cookie_get_without_origin_still_allowed
       # GETs are not mutations — the CSRF gate must not touch them.
       cookie = login_cookie
