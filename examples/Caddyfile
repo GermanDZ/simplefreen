@@ -1,0 +1,33 @@
+# Caddyfile — TLS-terminating sidecar for the simplefreen dev stack.
+#
+# `tls internal` mints a cert from Caddy's bundled local CA on first
+# start and persists it in the caddy_data volume. To make your browser
+# (and Actual) trust the cert, install Caddy's root CA once — see
+# docs/development.md § "Trust the local cert".
+#
+# For production, do not use this file. The operator guide ships a
+# real-cert recipe with ACME issuance — see
+# docs/operator-guide.md § Production deployment.
+{
+	admin off
+}
+
+simplefreen.localhost {
+	tls internal
+	encode zstd gzip
+
+	# Reverse-proxy freentonic's noVNC (HTML + websockify) through
+	# the same TLS surface so the inline VNC iframe in the admin UI
+	# works under HTTPS — opening an HTTP iframe inside an HTTPS
+	# page would be blocked by mixed-content rules. Caddy auto-
+	# upgrades the WebSocket on /novnc/websockify.
+	handle_path /novnc/* {
+		reverse_proxy freentonic:6080
+	}
+
+	# Backend defaults to the in-container simplefreen service. The
+	# `examples/docker-compose.native.yml` overlay overrides this to
+	# `host.docker.internal:7777` so a host-run simplefreen handles
+	# requests while caddy + freentonic stay containerized.
+	reverse_proxy {$SIMPLEFREEN_BACKEND:simplefreen:7878}
+}

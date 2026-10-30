@@ -1,0 +1,174 @@
+# Kamal deploy config for sure-finances, deployed from this repo.
+#
+# Source code lives at ../../sure-finances (sibling clone of upstream,
+# kept clean for contributor workflow — no deploy files there). This
+# config builds an image FROM that source dir as the docker build
+# context, pushes to GHCR, and runs on the same LXC as simplefreen.
+#
+# Topology:
+#
+#   edge proxy (<edge-ip>, off-host — terminates TLS with a publicly-
+#       trusted cert; not part of this repo, fronts both apps)
+#         │  plain HTTP, Host passthrough
+#         ▼
+#   kamal-proxy (host-wide singleton, shared with simplefreen)
+#         │  vhost-routes: $SIMPLEFREEN_HOST → simplefreen-web
+#         │                $SURE_HOST        → sure-web
+#         ▼
+#   sure-web ──┐
+#              ├── reads/writes ──▶ sure-postgres (accessory)
+#   sure-worker┘                 └▶ sure-redis    (accessory)
+#
+# Run kamal from THIS directory (simplefreen/sure/), not the simplefreen
+# root, so this project's .kamal/secrets and (empty) hooks dir are used
+# instead of simplefreen's:
+#
+#   cd simplefreen/sure
+#   kamal setup        # first time
+#   kamal deploy       # subsequent
+#
+# Before the first `kamal setup`:
+#   1. Pin the sure-finances ref you want to deploy:
+#        cd ../../sure-finances && git checkout <ref>
+#      Day-to-day development continues in that clone freely; only
+#      whatever's checked out at deploy time is what gets built.
+#   2. Export KAMAL_HOST (deploy target) and SURE_HOST (public
+#      hostname, e.g. sure.example.com) — e.g. from a gitignored .envrc.
+#      DNS: $SURE_HOST resolves to the edge proxy, which serves a
+#      publicly-trusted cert.
+#   3. Populate `.kamal/secrets` (see .kamal/secrets.example).
+#   4. Edge proxy: make sure a $SURE_HOST vhost forwarding to
+#      <KAMAL_HOST>:80 exists and the edge has been reloaded.
+
+service: sure
+secrets_path: .kamal/secrets
+
+image: sure-finances
+
+servers:
+  # Sure reaches simplefreen by hairpinning to its public name
+  # `https://$SIMPLEFREEN_HOST`, which resolves (via LAN DNS) to the
+  # edge proxy and back in — a publicly-trusted cert, so no add-host and
+  # no custom CA. If a container ever fails to resolve the name, add
+  # `add-host: "<simplefreen-host>:<edge-ip>"`
+  # (the EDGE IP, not the LXC) under options.
+  web:
+    hosts:
+      - <%= ENV.fetch("KAMAL_HOST") %>
+  worker:
+    hosts:
+      - <%= ENV.fetch("KAMAL_HOST") %>
+    cmd: bundle exec sidekiq
+    options:
+      init: true
+
+ssh:
+  user: root
+
+# Host-local Docker registry (the same one simplefreen runs for
+# freentonic) — no external auth, image stays on this LXC. We picked
+# this over GHCR because Kamal's automated `docker login -u -p` to
+# GHCR was intermittently failing with "denied: denied" even with a
+# valid PAT, while the laptop's buildx push succeeded via a separate
+# cached-creds path. 127.0.0.1:5000 is unauthenticated; the
+# credentials below are placeholders Kamal still requires syntactically.
+registry:
+  server: 127.0.0.1:5000
+  username:
+    - KAMAL_REGISTRY_USERNAME
+  password:
+    - GHCR_TOKEN
+
+# Build context points at the sibling sure-finances clone. Path is
+# resolved relative to this project root (simplefreen/sure/), so
+# ../../sure-finances = a sibling clone next to simplefreen.
+builder:
+  arch: amd64
+  # Build on the LXC itself, not on the laptop. The laptop is ARM
+  # (M-series) and cross-compiling amd64 Rails images via QEMU is slow
+  # and flaky — the openssl 4.x gem in particular crashes its native
+  # extension build under emulation (exit code 5 in bundle install).
+  # Remote builder = native amd64, no QEMU. Kamal rsyncs the build
+  # context over SSH on each `deploy`.
+  remote: ssh://root@<%= ENV.fetch("KAMAL_HOST") %>
+  context: ../../sure-finances
+  # Kamal resolves `dockerfile` relative to THIS project root
+  # (simplefreen/sure/), not to `context`. So both fields point at
+  # the sibling sure-finances clone.
+  dockerfile: ../../sure-finances/Dockerfile
+
+# Plain-HTTP mode: TLS terminated off-host by the edge Caddy.
+# `host: $SURE_HOST` registers this hostname with the shared
+# host-singleton kamal-proxy so it routes Host=$SURE_HOST to
+# sure-web on app_port.
+proxy:
+  ssl: false
+  host: <%= ENV.fetch("SURE_HOST") %>
+  app_port: 3000
+  healthcheck:
+    path: /up
+    interval: 10
+
+env:
+  clear:
+    RAILS_ENV: production
+    RAILS_LOG_TO_STDOUT: "true"
+    RAILS_SERVE_STATIC_FILES: "true"
+    # Caddy ←→ kamal-proxy ←→ app is plain HTTP; trust the proxy headers
+    # so config.force_ssl=true doesn't loop-redirect.
+    RAILS_ASSUME_SSL: "true"
+    RAILS_FORCE_SSL: "true"
+    SELF_HOSTED: "true"
+    APP_DOMAIN: "<%= ENV.fetch("SURE_HOST") %>"
+    # Kamal names accessories `<service>-<accessory>` and joins them to
+    # the kamal_<service> bridge network, so sure-web reaches them by
+    # name on the kamal_sure network.
+    DB_HOST: sure-postgres
+    DB_PORT: "5432"
+    POSTGRES_DB: sure_production
+    POSTGRES_USER: sure
+    REDIS_URL: "redis://sure-redis:6379/1"
+    ACTIVE_STORAGE_SERVICE: local
+    # No SSL_CA_FILE: simplefreen is now reached at
+    # https://$SIMPLEFREEN_HOST, served by the edge proxy with a
+    # publicly-trusted Let's Encrypt cert. Sure's default system trust
+    # store validates it — there's no internal CA to mount anymore.
+  secret:
+    - SECRET_KEY_BASE
+    - POSTGRES_PASSWORD
+    # OpenAI key powers Sure's AI-assisted features (chat, rules).
+    # Optional — Sure runs fine without it; AI features just stay
+    # unavailable. Costs hit your OpenAI account.
+    - OPENAI_ACCESS_TOKEN
+    # When you wire up email / WebAuthn, add SMTP_* and WEBAUTHN_* here
+    # and in .kamal/secrets (see ../../sure-finances/.env.example for
+    # the full env contract).
+
+# Volumes apply to every role (web + worker).
+# - sure_storage: ActiveStorage local disk; survives image rebuilds.
+# (The old caddy-root.crt bind mount is gone — simplefreen's cert is now
+# publicly trusted via the edge Caddy, so there's no internal CA root to
+# mount. You can delete /etc/simplefreen/caddy-root.crt on the LXC and
+# the gitignored laptop copy at sure/caddy-root.crt.)
+volumes:
+  - "sure_storage:/rails/storage"
+
+accessories:
+  postgres:
+    image: postgres:16-alpine
+    host: <%= ENV.fetch("KAMAL_HOST") %>
+    env:
+      clear:
+        POSTGRES_DB: sure_production
+        POSTGRES_USER: sure
+      secret:
+        - POSTGRES_PASSWORD
+    volumes:
+      - "sure_postgres_data:/var/lib/postgresql/data"
+
+  redis:
+    image: redis:7-alpine
+    host: <%= ENV.fetch("KAMAL_HOST") %>
+    cmd: "redis-server --save 60 1 --loglevel warning"
+    volumes:
+      - "sure_redis_data:/data"

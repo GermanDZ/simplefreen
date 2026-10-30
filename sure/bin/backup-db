@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+# bin/backup-db — back up the prod sure-finances Postgres database.
+#
+# Stores a custom-format pg_dump in ./backups/ on the laptop. Run this
+# before `kamal deploy` when the deploy is going to migrate schema, so
+# you can roll back with bin/restore-db if a migration goes sideways.
+#
+# Usage:
+#   bin/backup-db                  → backups/sure-<utc-stamp>.dump
+#   bin/backup-db before-upgrade   → backups/sure-<utc-stamp>-before-upgrade.dump
+#
+# Override the target via env if config/deploy.yml ever changes:
+#   SURE_BACKUP_HOST=root@1.2.3.4 SURE_BACKUP_PG_DB=foo bin/backup-db
+
+set -euo pipefail
+
+HOST="${SURE_BACKUP_HOST:-root@${KAMAL_HOST:?set KAMAL_HOST to the deploy host}}"
+CONTAINER="${SURE_BACKUP_CONTAINER:-sure-postgres}"
+PG_USER="${SURE_BACKUP_PG_USER:-sure}"
+PG_DB="${SURE_BACKUP_PG_DB:-sure_production}"
+
+cd "$(dirname "$0")/.."
+mkdir -p backups
+
+stamp=$(date -u +%Y%m%d-%H%M%SZ)
+label="${1:+-$1}"
+out="backups/sure-${stamp}${label}.dump"
+tmp="${out}.partial"
+
+echo "→ pg_dump ${PG_DB} on ${HOST} → ${out}"
+# Write to .partial then move on success — never leave a half-written
+# dump that looks complete.
+ssh "${HOST}" "docker exec ${CONTAINER} pg_dump -U ${PG_USER} -d ${PG_DB} -Fc --no-owner --no-acl" > "${tmp}"
+mv "${tmp}" "${out}"
+
+ln -sfn "sure-${stamp}${label}.dump" backups/sure.latest.dump
+
+ls -lh "${out}"
+echo "✓ symlink: backups/sure.latest.dump → $(basename "${out}")"

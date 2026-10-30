@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+# bin/restore-db — restore a backup created by bin/backup-db.
+#
+# DESTRUCTIVE: drops and recreates every object in the target database.
+# Typical use: roll back after a botched upgrade. Requires explicit
+# confirmation by typing the target DB name.
+#
+# The restore itself doesn't touch the app containers — you decide
+# whether to stop them first. Recommended order:
+#
+#   kamal app stop                          # avoid writes mid-restore
+#   bin/restore-db backups/<file>.dump
+#   kamal app boot
+#
+# Usage:
+#   bin/restore-db backups/sure-<stamp>.dump
+#   bin/restore-db backups/sure.latest.dump
+
+set -euo pipefail
+
+HOST="${SURE_BACKUP_HOST:-root@${KAMAL_HOST:?set KAMAL_HOST to the deploy host}}"
+CONTAINER="${SURE_BACKUP_CONTAINER:-sure-postgres}"
+PG_USER="${SURE_BACKUP_PG_USER:-sure}"
+PG_DB="${SURE_BACKUP_PG_DB:-sure_production}"
+
+if [ "$#" -ne 1 ]; then
+  echo "usage: $0 <path-to-dump>" >&2
+  exit 2
+fi
+
+cd "$(dirname "$0")/.."
+dump="$1"
+if [ ! -f "$dump" ]; then
+  echo "error: not a file: $dump" >&2
+  exit 1
+fi
+
+size=$(du -h "$dump" | cut -f1)
+cat <<EOF >&2
+
+About to RESTORE (destructive):
+  source : ${dump} (${size})
+  target : ${PG_DB}@${CONTAINER} on ${HOST}
+
+This drops and recreates every object in the target database. Type the
+target database name to confirm (${PG_DB}):
+EOF
+read -r confirm
+[ "$confirm" = "${PG_DB}" ] || { echo "abort" >&2; exit 1; }
+
+echo "→ pg_restore..." >&2
+ssh "$HOST" "docker exec -i ${CONTAINER} pg_restore -U ${PG_USER} -d ${PG_DB} --clean --if-exists --no-owner --no-acl" < "$dump"
+
+echo "✓ restored ${dump} → ${PG_DB}@${HOST}" >&2
+echo "  next: 'kamal app boot' (and 'kamal app boot -r worker' if web wasn't stopped together)" >&2

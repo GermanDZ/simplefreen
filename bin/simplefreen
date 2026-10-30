@@ -1,0 +1,150 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+$LOAD_PATH.unshift(File.expand_path("../lib", __dir__))
+
+require "optparse"
+require "simplefreen"
+
+options = {
+  listen_addr:   ENV["SIMPLEFREEN_LISTEN_ADDR"] || Simplefreen::Server::DEFAULT_ADDR,
+  listen_port:   (ENV["SIMPLEFREEN_LISTEN_PORT"] || Simplefreen::Server::DEFAULT_PORT).to_i,
+  workflows_dir: ENV["SIMPLEFREEN_WORKFLOWS_DIR"] || "/workflows",
+  timeout_sec:   (ENV["SIMPLEFREEN_DEFAULT_TIMEOUT_SEC"] || "1800").to_i
+}
+
+OptionParser.new do |opts|
+  opts.banner = "Usage: simplefreen [options]"
+  opts.on("--listen-addr ADDR", "Bind address (default #{options[:listen_addr]})") { |v| options[:listen_addr] = v }
+  opts.on("--listen-port PORT", Integer, "Port (default #{options[:listen_port]})") { |v| options[:listen_port] = v }
+  opts.on("--workflows-dir DIR", "Read-only view of freentonic's workflows dir, used by the admin UI to list available workflows (default #{options[:workflows_dir]})") { |v| options[:workflows_dir] = v }
+  opts.on("--timeout-sec SEC", Integer, "Default per-sync timeout (default #{options[:timeout_sec]}s)") { |v| options[:timeout_sec] = v }
+  opts.on("-h", "--help") { puts opts; exit 0 }
+  opts.on("--version") { puts "simplefreen #{Simplefreen::VERSION}"; exit 0 }
+end.parse!(ARGV)
+
+logger = ->(msg) { $stdout.puts(msg) }
+
+feature = begin
+  Simplefreen::Feature.from_env(logger: logger)
+rescue Simplefreen::ConfigError => e
+  warn e.message
+  exit 2
+end
+feature.recover_on_boot!
+
+feature.install_push_tokens(Simplefreen::PushTokens.new)
+
+health_interval = (ENV["SIMPLEFREEN_FREENTONIC_HEALTH_INTERVAL_SECONDS"] || "").strip
+health_kwargs = { client: feature.freentonic_client, logger: logger }
+if !health_interval.empty? && (parsed = Integer(health_interval, 10) rescue nil) && parsed > 0
+  health_kwargs[:interval_seconds] = parsed
+end
+health = Simplefreen::FreentonicHealth.new(**health_kwargs)
+feature.install_freentonic_health(health)
+health.start
+
+scheduler = Simplefreen::Scheduler.new(
+  feature:             feature,
+  default_timeout_sec: options[:timeout_sec]
+)
+feature.install_scheduler(scheduler)
+scheduler.start
+
+feature.start_housekeeper
+feature.start_auto_sync_ticker
+
+# Watchdog: pushes ntfy alerts on stale / failed / needs-reauth profiles and
+# a dead scheduler worker. No-op (and no thread) unless SIMPLEFREEN_NTFY_URL
+# is configured. See docs/operator-guide.md.
+notifier = Simplefreen::Notifier.from_env(logger: logger)
+feature.install_notifier(notifier)
+
+watchdog_kwargs = { feature: feature, notifier: notifier, logger: logger }
+wd_interval = (ENV["SIMPLEFREEN_WATCHDOG_INTERVAL_SECONDS"] || "").strip
+if !wd_interval.empty? && (parsed = Integer(wd_interval, 10) rescue nil) && parsed > 0
+  watchdog_kwargs[:interval_seconds] = parsed
+end
+wd_renotify = (ENV["SIMPLEFREEN_WATCHDOG_RENOTIFY_SECONDS"] || "").strip
+if !wd_renotify.empty? && (parsed = Integer(wd_renotify, 10) rescue nil) && parsed > 0
+  watchdog_kwargs[:renotify_seconds] = parsed
+end
+watchdog = Simplefreen::Watchdog.new(**watchdog_kwargs)
+feature.install_watchdog(watchdog)
+if notifier.configured?
+  watchdog.start
+  logger.call("[simplefreen] watchdog: ntfy alerts enabled (#{notifier.url})")
+else
+  logger.call("[simplefreen] watchdog: disabled (set SIMPLEFREEN_NTFY_URL to enable phone alerts)")
+end
+
+asset_dir = File.expand_path("../lib/simplefreen/ui", __dir__)
+router = Simplefreen::Router.new(
+  feature:       feature,
+  workflows_dir: options[:workflows_dir],
+  asset_dir:     asset_dir
+)
+
+server = Simplefreen::Server.new(
+  router:      router,
+  listen_addr: options[:listen_addr],
+  listen_port: options[:listen_port],
+  logger:      $stdout
+)
+
+shutdown_signals_received = 0
+%w[TERM INT].each do |sig|
+  # First signal: defer the shutdown to a thread (signal handlers on
+  # Ruby 3.4 + macOS arm64 segfault the VM if they close a socket
+  # the main thread is in TCPServer#accept on). The thread runs
+  # outside the handler context, calls server.shutdown which does a
+  # socket-shutdown(SHUT_RDWR)+close — that wakes accept on macOS.
+  #
+  # Second signal: the user is impatient (or graceful shutdown is
+  # stuck on something — e.g. a freentonic that doesn't respond to
+  # cancel). Hard-exit. State stores all use atomic writes so partial
+  # work was either committed or never started; an in-flight browse
+  # session may leave Chrome open until freentonic's own timeout.
+  Signal.trap(sig) do
+    shutdown_signals_received += 1
+    if shutdown_signals_received >= 2
+      $stderr.puts "[simplefreen] hard exit (signal received twice)"
+      exit!(130)
+    end
+    $stderr.puts "[simplefreen] shutting down... press ^C again to force exit"
+    Thread.new { server.shutdown }
+  end
+end
+
+server.start
+
+# After server.shutdown closes the listen socket, walk the cleanup
+# chain in dependency order. The scheduler thread blocks on a
+# synchronous HTTP read against freentonic for the entire duration of
+# any in-flight /invoke — for a browse session that's "until the
+# operator clicks Stop browsing." Without an active cancel, scheduler
+# .stop would join-timeout after 30 s and the orphan worker thread
+# would keep the Ruby process alive past the main thread.
+if (active = scheduler.active_job)
+  run_id = active.is_a?(Hash) ? (active[:run_id] || active["run_id"]) : nil
+  if run_id
+    begin
+      feature.freentonic_client.cancel(run_id)
+    rescue StandardError => e
+      $stderr.puts "[simplefreen] failed to cancel active run #{run_id}: #{e.class}: #{e.message}"
+    end
+  end
+end
+
+scheduler.stop
+health.stop
+watchdog.stop
+feature.stop_auto_sync_ticker
+feature.stop_housekeeper
+
+# Belt-and-suspenders: any remaining background thread (e.g. a
+# scheduler worker still draining a slow invoke despite the cancel)
+# would otherwise hold the process open. Hard-exit instead — the
+# state stores all use atomic writes so partial work was either
+# committed or never started.
+exit 0

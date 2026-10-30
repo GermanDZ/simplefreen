@@ -1,0 +1,139 @@
+# Kamal deploy config for simplefreen — single edge-proxy deployment.
+#
+# Host-specific values come from the environment (Kamal renders this
+# file through ERB), so nothing about a particular network is committed.
+# Export them from a gitignored `.envrc` (direnv) or your shell:
+#
+#   KAMAL_HOST          ssh/deploy target, e.g. the LXC's LAN address
+#   SIMPLEFREEN_HOST    public hostname, e.g. simplefreen.example.com
+#
+# Topology: one host (e.g. an LXC) runs two containers wired together on
+# the kamal_simplefreen bridge network, fronted by an OFF-HOST edge
+# reverse proxy that terminates TLS:
+#
+#   edge proxy (<edge-ip>) ← LAN/VPN clients hit 443 here; terminates
+#     │                       TLS (e.g. a Let's Encrypt wildcard via
+#     │                       DNS-01). Not part of this repo.
+#     ▼
+#   kamal-proxy (:80, host-wide singleton) ← edge proxies straight here
+#     │                                       over plain HTTP; vhost-routes
+#     │                                       by Host header.
+#     ▼
+#   simplefreen  ← built by Kamal, pushed to ghcr.io, run on the host
+#     │
+#     ▼
+#   freentonic   ← built FROM SOURCE on the host via .kamal/hooks/pre-deploy
+#                  and pushed to a host-local Docker registry on :5000
+#
+# Before the first `kamal deploy`:
+#   1. DNS: $SIMPLEFREEN_HOST resolves to the edge proxy, and the edge
+#      vhost for it forwards to <KAMAL_HOST>:80 (and /novnc/* to :17080).
+#   2. Populate `.kamal/secrets` (see .kamal/secrets.example).
+#   3. Optionally seed the data volume from your laptop dev tree:
+#        bin/seed-volumes
+#      (See operator-guide.md § "Seeding the data volume".)
+#
+# State lives in named Docker volumes (`simplefreen_*`) — Docker
+# creates them on first deploy and persists them across redeploys.
+# No `mkdir -p` on the host needed.
+#
+# The freentonic image is built by .kamal/hooks/pre-deploy on each
+# `kamal deploy`. Set SKIP_FREENTONIC_BUILD=1 when iterating only on
+# simplefreen and the freentonic source hasn't moved.
+
+service: simplefreen
+secrets_path: .kamal/secrets
+
+image: germandz/simplefreen
+
+servers:
+  web:
+    hosts:
+      - <%= ENV.fetch("KAMAL_HOST") %>
+
+ssh:
+  user: root
+
+registry:
+  server: ghcr.io
+  username:
+    - KAMAL_REGISTRY_USERNAME
+  password:
+    - GHCR_TOKEN
+
+builder:
+  arch: amd64
+  context: .
+  dockerfile: docker/Dockerfile
+
+# kamal-proxy in plain-HTTP mode. It does request gating and
+# zero-downtime rollover during deploys; the off-host edge Caddy in
+# front of it terminates TLS. No `proxy.host` here on purpose — this
+# service stays the kamal-proxy catch-all, so both the edge-forwarded
+# `Host: $SIMPLEFREEN_HOST` and the internal-push `Host:
+# kamal-proxy` (see SIMPLEFREEN_INTERNAL_PUSH_URL) route to simplefreen-web.
+proxy:
+  ssl: false
+  app_port: 7878
+  healthcheck:
+    path: /healthz
+    interval: 10
+
+env:
+  clear:
+    SIMPLEFREEN_LISTEN_ADDR: "0.0.0.0"
+    SIMPLEFREEN_LISTEN_PORT: "7878"
+    SIMPLEFREEN_PUBLIC_URL: "https://<%= ENV.fetch("SIMPLEFREEN_HOST") %>"
+    # Container-network DNS name of the freentonic accessory. Kamal
+    # names accessory containers `<service>-<accessory>` and joins
+    # them to the kamal_<service> bridge network, so simplefreen
+    # reaches freentonic at simplefreen-freentonic:7878.
+    FREENTONIC_URL: "http://simplefreen-freentonic:7878"
+    # Internal push callback freentonic uses to POST normalized
+    # payloads back. The app container is named `simplefreen-web-<sha>`
+    # (sha rolls on every deploy), so we can't use a stable hostname
+    # directly. kamal-proxy is the stable, network-aliased entry point
+    # that already knows how to route to the current app container, and
+    # since simplefreen-web is the kamal-proxy catch-all (no proxy.host),
+    # the bare `Host: kamal-proxy` of this internal POST routes to it.
+    SIMPLEFREEN_INTERNAL_PUSH_URL: "http://kamal-proxy:80"
+    SIMPLEFREEN_FREENTONIC_HEALTH_INTERVAL_SECONDS: "300"
+  secret:
+    - SIMPLEFREEN_SECRETS_KEY
+    - SIMPLEFREEN_ADMIN_PASSWORD
+    - FREENTONIC_INVOKE_TOKEN
+
+# Named Docker volumes — Docker manages the lifecycle, contents
+# survive `kamal redeploy` and image rebuilds. To seed them from a
+# laptop's dev/data tree on first deploy, see `bin/seed-volumes`.
+# Inspect with `ssh root@<host> docker volume ls | grep simplefreen_`.
+volumes:
+  - "simplefreen_data:/data"
+  - "simplefreen_workflows:/workflows"
+  - "simplefreen_runs:/workspace/runs:ro"
+
+accessories:
+  # Freentonic — pulled from the host-local registry that
+  # .kamal/hooks/pre-deploy pushes to on every deploy.
+  freentonic:
+    image: localhost:5000/freentonic:latest
+    host: <%= ENV.fetch("KAMAL_HOST") %>
+    # noVNC published on the LXC host (all interfaces) so the off-host
+    # edge Caddy can route https://$SIMPLEFREEN_HOST/novnc/* to
+    # it during a re-auth. The `ssh -L 17080:localhost:17080 root@…`
+    # tunnel still works via loopback. This surface shows a live
+    # bank-login browser: it's password-protected (the noVNC URL carries
+    # the VNC password) and LAN/VPN-only via the edge. Optionally add a
+    # source-IP allowlist at the edge.
+    port: "17080:6080"
+    env:
+      clear:
+        FREENTONIC_VNC: "1"
+      secret:
+        - FREENTONIC_INVOKE_TOKEN
+    volumes:
+      - "simplefreen_workflows:/home/freentonic/workflows:ro"
+      - "simplefreen_runs:/workspace/runs"
+      - "simplefreen_freentonic_chrome:/home/freentonic/.cache/freentonic/chrome"
+    options:
+      shm-size: "256m"

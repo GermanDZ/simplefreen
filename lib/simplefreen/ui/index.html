@@ -1,0 +1,198 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Freentonic — SimpleFIN bridge</title>
+  <link rel="icon" type="image/svg+xml" href="/admin/assets/favicon.svg">
+  <link rel="stylesheet" href="/admin/assets/lib/tokens.css">
+  <link rel="stylesheet" href="/admin/assets/styles.css">
+  <!-- Synchronous theme bootstrap; runs before the deferred app.js
+       module so the first paint matches the saved preference.
+       External file because the CSP forbids inline scripts. -->
+  <script src="/admin/assets/lib/boot.js"></script>
+</head>
+<body>
+  <header>
+    <h1>Freentonic <span class="tag">SimpleFIN bridge</span></h1>
+    <nav class="primary-nav" aria-label="Primary">
+      <a href="#/dashboard" data-route-link="dashboard">Dashboard</a>
+      <a href="#/manage" data-route-link="manage">Manage</a>
+      <a href="#/consolidation" data-route-link="consolidation">Consolidation</a>
+    </nav>
+    <div id="freentonic-health" class="freentonic-health" hidden>
+      <span class="health-label">freentonic</span>
+      <span id="freentonic-state" class="health-state"></span>
+      <button id="freentonic-refresh" type="button" title="Probe freentonic now">↻</button>
+    </div>
+    <button id="theme-toggle" type="button" class="theme-toggle" aria-label="Cycle theme" title="Theme: cycle Auto → Light → Dark">
+      <span id="theme-toggle-icon" aria-hidden="true">◐</span>
+      <span id="theme-toggle-label">Auto</span>
+    </button>
+    <form method="post" action="/admin/logout" class="logout-form">
+      <button type="submit">Sign out</button>
+    </form>
+  </header>
+
+  <main>
+    <section class="route-view" data-route-view="welcome" hidden>
+      <div id="welcome-body"></div>
+    </section>
+
+    <section class="route-view" data-route-view="dashboard" hidden>
+      <div id="dashboard-body"></div>
+    </section>
+
+    <section class="route-view" data-route-view="profile-detail" hidden>
+      <div id="profile-detail-body">
+        <div id="profile-detail-upper"></div>
+        <div id="profile-detail-schedule"></div>
+        <div id="profile-detail-runs"></div>
+      </div>
+    </section>
+
+    <div class="route-view" data-route-view="manage" hidden>
+    <section class="panel">
+      <div class="panel-head">
+        <h2>Profiles</h2>
+        <div class="panel-head-actions">
+          <span id="workflows-meta" class="workflows-meta" hidden></span>
+          <button id="refresh-workflows-btn" type="button" title="Pull provider workflow YAMLs from github.com/GermanDZ/freentonic-providers at a specific ref">↻ Refresh workflows…</button>
+          <button id="sync-all-btn" type="button" title="Enqueue a sync for every source profile with credentials. The scheduler runs them one at a time.">↻ Sync all</button>
+          <button id="new-profile-btn" type="button">+ New profile</button>
+        </div>
+      </div>
+      <div id="profiles"></div>
+    </section>
+
+    <section id="new-profile-panel" class="panel hidden">
+      <h2>New profile</h2>
+      <p class="sub">Each profile is one bank source: credentials, scrape schedule, and its own SimpleFIN URL. You can <a href="#/consolidation">consolidate</a> several into one merged URL later.</p>
+      <form id="new-profile-form">
+        <label>Profile key
+          <input name="profile_key" required pattern="[A-Za-z0-9_.\-]{1,128}" placeholder="ing_personal">
+          <small class="field-help">Lowercase, no spaces. Used in the URL and on disk — pick something stable like <code>ing_personal</code>. Allowed: letters, digits, <code>_ . -</code>.</small>
+        </label>
+        <label>Display name
+          <input name="display_name" placeholder="ING (personal)">
+          <small class="field-help">Human label shown in the UI. Optional — defaults to the profile key.</small>
+        </label>
+        <label>Workflow
+          <select name="workflow" required></select>
+          <small class="field-help">The freentonic workflow YAML that drives this bank's scrape. Refresh from the providers repo via <strong>↻ Refresh workflows…</strong> above.</small>
+        </label>
+        <label>Lookback mode
+          <select name="lookback_mode">
+            <option value="incremental" selected>incremental — request only days since last sync (+ overlap)</option>
+            <option value="fixed">fixed — always request the same window</option>
+          </select>
+          <small class="field-help"><strong>Incremental</strong> is the right default: each sync asks for the gap since the last successful tx (plus an overlap, to absorb timing skew at the bank). <strong>Fixed</strong> always asks for the same <em>Fixed lookback</em> window — useful for banks that don't behave well with short windows.</small>
+        </label>
+        <label>Fixed lookback (days)
+          <input name="lookback_days" type="number" value="30" min="1" max="3650">
+          <small class="field-help">Only used when mode = fixed. Ignored otherwise.</small>
+        </label>
+        <label>Max lookback (days)
+          <input name="max_lookback_days" type="number" value="365" min="1" max="3650">
+          <small class="field-help">Hard ceiling. Incremental syncs never request beyond this; the very first sync (cold start) backfills up to this window.</small>
+        </label>
+        <label>Incremental overlap (days)
+          <input name="lookback_overlap_days" type="number" value="10" min="0" max="365">
+          <small class="field-help">Extra days requested past the last-seen transaction. Cushions clock drift and pending-vs-posted lag at the bank. 10 days is a safe default.</small>
+        </label>
+        <label>Auto-sync interval (seconds)
+          <input name="sync_interval_seconds" type="number" min="300" placeholder="e.g. 21600 for 6h">
+          <small class="field-help">Blank = manual sync only. Minimum 300 (5 min). Typical: <code>21600</code> (6h) or <code>86400</code> (24h). The scheduler skips runs while another job is active.</small>
+        </label>
+        <div class="row">
+          <button type="submit">Create</button>
+          <button type="button" id="new-profile-cancel">Cancel</button>
+        </div>
+      </form>
+    </section>
+
+    <section id="credentials-panel" class="panel hidden">
+      <h2>Provision credentials — <span id="cred-profile"></span></h2>
+      <form id="credentials-form"></form>
+    </section>
+
+    <section id="setup-token-panel" class="panel hidden">
+      <h2>Setup token</h2>
+      <p>Paste this into Actual Budget's SimpleFIN setup field. It expires in 10 minutes and can only be used once.</p>
+      <textarea id="setup-token-value" readonly rows="3"></textarea>
+      <button type="button" id="copy-setup-token">Copy</button>
+    </section>
+    </div>
+
+    <div class="route-view" data-route-view="consolidation" hidden>
+      <section class="panel" id="consolidation-overview">
+        <div id="consolidation-overview-body"></div>
+        <details class="consolidation-explainer-details">
+          <summary>What is consolidation?</summary>
+          <p class="sub">
+            Each bank profile scrapes its own source and serves a per-profile
+            SimpleFIN URL. <strong>Consolidation</strong> overlays a second
+            surface on top of those sources: one merged SimpleFIN URL that
+            downstream apps (Actual, Sure.am) can point at instead.
+          </p>
+          <ol class="explainer-steps">
+            <li>
+              <strong>Link.</strong> Accounts seen in two or more sources are
+              joined into a group. Auto-linking uses portable identifiers
+              (IBAN-derived); for sources without those, add a manual alias.
+            </li>
+            <li>
+              <strong>Window.</strong> For each linked group, pick a primary
+              source and optional per-source date windows so history is split
+              cleanly (e.g. ING from 2025-01-01, Fintonic up to 2024-12-31)
+              with no duplicate transactions.
+            </li>
+            <li>
+              <strong>Serve.</strong> Set up the consolidated profile to mint
+              the single SimpleFIN URL. Per-profile URLs keep working in
+              parallel. Use Export preview to verify exactly what the merged
+              URL emits before re-linking clients.
+            </li>
+          </ol>
+        </details>
+      </section>
+
+      <section class="panel" id="consolidation-panel">
+        <div class="panel-head">
+          <h2>Linked accounts</h2>
+          <div class="panel-head-actions">
+            <span id="consolidation-meta" class="workflows-meta"></span>
+            <button id="add-alias-btn" type="button" title="Manually link two accounts that share no portable identifier (e.g. Fintonic accounts whose product_id is an opaque hash)">+ Add alias</button>
+          </div>
+        </div>
+        <p class="sub">Accounts that are the same physical bank account, observed across multiple sources. Auto-linked groups are joined by a portable identifier (e.g. IBAN-derived). Aliased groups were linked manually by you.</p>
+        <div id="consolidation-groups"></div>
+      </section>
+
+      <section class="panel" id="virtual-profile-panel">
+        <div class="panel-head">
+          <h2>Consolidated profile</h2>
+          <div class="panel-head-actions">
+            <span id="virtual-profile-meta" class="workflows-meta"></span>
+            <button id="virtual-profile-reset-primaries-btn" type="button" hidden title="Clear pinned primary on every linked group so each one falls back to the heuristic (which prefers real banks over aggregators).">Reset primaries to suggested</button>
+            <button id="virtual-profile-create-btn" type="button" title="Create the singleton 'consolidated' profile that aggregates every source into one SimpleFIN URL">Set up consolidated profile</button>
+          </div>
+        </div>
+        <p class="sub">A single SimpleFIN URL that serves the merged view across every source. Per-source date windows let you split history (e.g. ING from 2025-01-01, Fintonic up to 2024-12-31) without complex deduplication. Per-profile URLs keep working in parallel.</p>
+        <div id="virtual-profile-body"></div>
+      </section>
+
+      <section class="panel" id="export-preview-panel">
+        <div class="panel-head">
+          <h2>Export preview</h2>
+          <span id="export-preview-meta" class="workflows-meta"></span>
+        </div>
+        <p class="sub">Exactly what the consolidated SimpleFIN URL is currently emitting to downstream apps (Sure.am, Actual). Use this to verify what gets exported before pointing a client at it.</p>
+        <div id="export-preview-body"></div>
+      </section>
+    </div>
+  </main>
+
+  <script type="module" src="/admin/assets/app.js"></script>
+</body>
+</html>

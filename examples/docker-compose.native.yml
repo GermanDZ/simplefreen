@@ -1,0 +1,46 @@
+# Compose overlay for "host-native simplefreen" dev mode.
+#
+# What it does:
+#   - Drops the simplefreen container — you run `bin/dev-native` on
+#     the host instead.
+#   - Points Caddy at host.docker.internal:7777 so the HTTPS surface
+#     still works at https://simplefreen.localhost.
+#   - Tells freentonic to reach simplefreen at host.docker.internal
+#     too, so the per-run push callback lands.
+#
+# Why:
+#   Avoids the rebuild-image / recreate-container loop on every Ruby
+#   or JS change. ~10 s saved per iteration, plus you can attach a
+#   debugger / pry / hot-reload at will. Trade-off: state lives on
+#   the host (under SIMPLEFREEN_ROOT, default ./simplefreen-data).
+#
+# Usage:
+#   docker compose \
+#     -f examples/docker-compose.yml \
+#     -f examples/docker-compose.native.yml \
+#     up -d freentonic caddy
+#   bin/dev-native        # in another terminal — runs simplefreen on :7777
+
+services:
+  # Drop the simplefreen container — you run it on the host instead.
+  # docker compose v2 supports this via `!reset`.
+  simplefreen:
+    profiles: ["never"]   # never started by `docker compose up`
+
+  caddy:
+    environment:
+      # Override the default `simplefreen:7878` backend in the
+      # Caddyfile. host.docker.internal resolves to the host's
+      # gateway on Docker Desktop / Colima; the extra_hosts entry
+      # below makes it work on Linux too.
+      SIMPLEFREEN_BACKEND: "host.docker.internal:7777"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    # depends_on simplefreen no longer applies — clear it.
+    depends_on: !reset []
+
+  freentonic:
+    # The push callback freentonic POSTs to lives on the host now.
+    # Keep the mapping resolvable from inside the container.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"

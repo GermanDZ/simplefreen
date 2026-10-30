@@ -1,0 +1,112 @@
+#!/usr/bin/env bash
+# Seed Docker named volumes on the LXC from your local dev tree.
+#
+# Use case: first-time deploy. You've been running simplefreen via
+# bin/dev-native locally, your encrypted credentials + profile JSON
+# live under dev/data/simplefreen/, and you want that state on the
+# server before the first sync runs there.
+#
+# Strategy: tar locally → scp → extract inside a one-shot helper
+# container that mounts the named volume. Refuses to clobber a non-
+# empty volume unless --force is set, so re-running by accident
+# can't wipe production state.
+#
+# Defaults seed `simplefreen_data` from `dev/data/simplefreen/`. To
+# seed extras, repeat with --volume / --from. The other volumes
+# (`simplefreen_workflows`, `simplefreen_runs`,
+# `simplefreen_freentonic_chrome`, the Caddy ones) are usually fine
+# to leave empty — the admin UI's "Refresh workflows" button pulls
+# providers, freentonic mints a Chrome profile on first sync, and
+# Caddy initializes its CA on first start.
+#
+# Examples:
+#   bin/seed-volumes
+#   bin/seed-volumes --volume simplefreen_data --from dev/data/simplefreen
+#   bin/seed-volumes --force --volume simplefreen_data --from /backup/2026-05-14
+#
+# Env:
+#   KAMAL_HOST       ssh target (required)
+#   KAMAL_SSH_USER   ssh user (default: root)
+
+set -euo pipefail
+
+HOST="${KAMAL_HOST:?set KAMAL_HOST to the deploy host}"
+SSH_USER="${KAMAL_SSH_USER:-root}"
+FORCE=0
+VOLUME=""
+SRC=""
+
+usage() {
+  cat >&2 <<'EOF'
+Usage: bin/seed-volumes [--volume NAME --from PATH] [--force]
+
+Without --volume/--from, defaults to:
+  --volume simplefreen_data --from dev/data/simplefreen
+
+EOF
+}
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --volume) VOLUME="$2"; shift 2 ;;
+    --from)   SRC="$2";    shift 2 ;;
+    --force)  FORCE=1;     shift   ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "unknown arg: $1" >&2; usage; exit 2 ;;
+  esac
+done
+
+if [ -z "$VOLUME" ] && [ -z "$SRC" ]; then
+  VOLUME="simplefreen_data"
+  SRC="dev/data/simplefreen"
+fi
+
+if [ -z "$VOLUME" ] || [ -z "$SRC" ]; then
+  echo "must pass both --volume and --from (or neither, to take the defaults)" >&2
+  exit 2
+fi
+
+if [ ! -d "$SRC" ]; then
+  echo "source path not found: $SRC" >&2
+  exit 2
+fi
+
+# `du -sh` is portable between macOS (BSD) and Linux (GNU); avoid -b.
+size=$(du -sh "$SRC" | awk '{print $1}')
+echo "[seed-volumes] $SRC ($size) → volume $VOLUME on $SSH_USER@$HOST"
+
+# 1. Create the volume if missing + check whether it already has
+#    data. Tiny helper container does the introspection; mount the
+#    volume read-only and count entries.
+ssh "$SSH_USER@$HOST" VOLUME="$VOLUME" FORCE="$FORCE" bash -s <<'REMOTE'
+set -euo pipefail
+docker volume create "$VOLUME" >/dev/null
+existing=$(docker run --rm -v "$VOLUME":/v:ro alpine sh -c 'ls -A /v | wc -l')
+if [ "$existing" -gt 0 ] && [ "$FORCE" != "1" ]; then
+  echo "[seed-volumes] refusing to seed: volume $VOLUME already has $existing entries (pass --force to overwrite)" >&2
+  exit 3
+fi
+if [ "$existing" -gt 0 ]; then
+  echo "[seed-volumes] --force set: wiping $existing existing entries from $VOLUME"
+  docker run --rm -v "$VOLUME":/v alpine sh -c 'find /v -mindepth 1 -delete'
+fi
+REMOTE
+
+# 2. Stream a tar of $SRC contents through ssh into a helper
+#    container that extracts inside the volume. `tar -C "$SRC" .`
+#    keeps the archive paths relative so the volume root receives
+#    the contents (not the wrapping dir).
+#
+# Building the remote command as a single string ensures the inner
+# `sh -c '…'` quoting survives transport through ssh — passing
+# positional args would have ssh re-join with spaces and drop the
+# single quotes, leaving busybox tar with no command at all.
+remote="docker run --rm -i -v ${VOLUME}:/v alpine sh -c 'tar -xf - -C /v && find /v -name \"._*\" -delete && chown -R 10001:10001 /v && echo seeded'"
+
+# COPYFILE_DISABLE=1 stops macOS bsdtar from embedding AppleDouble
+# (`._*`) sidecar files into the archive; the post-extract `find -delete`
+# scrubs them on the server side too as a belt-and-braces.
+COPYFILE_DISABLE=1 tar --exclude='._*' --exclude='.DS_Store' -C "$SRC" -cf - . | \
+  ssh "$SSH_USER@$HOST" "$remote"
+
+echo "[seed-volumes] done — volume $VOLUME populated"

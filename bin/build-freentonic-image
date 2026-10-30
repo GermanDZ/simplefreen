@@ -1,0 +1,143 @@
+#!/usr/bin/env bash
+# Build the freentonic image directly on the LXC and push it to a
+# host-local Docker registry so Kamal's accessory pull picks it up.
+#
+# Source selection (first match wins):
+#   1. $FREENTONIC_SRC — explicit path to a local freentonic checkout
+#   2. ../freentonic relative to this repo — sibling checkout default
+#   3. git clone from $FREENTONIC_REPO at $FREENTONIC_REF — fallback
+#      for fresh hosts that don't have a local checkout
+#
+# This lets you iterate on freentonic locally without pushing to
+# GitHub on every redeploy — typical dev loop for a LAN-only setup.
+#
+# Why build on the LXC: the freentonic image is amd64, Chrome-heavy,
+# and not published to a public registry. Building remotely avoids a
+# slow buildx push over LAN.
+#
+# Env:
+#   FREENTONIC_SRC    local path to sync (default: ../freentonic if present)
+#   FREENTONIC_REPO   git URL to clone if no local source (default: GitHub upstream)
+#   FREENTONIC_REF    branch/tag/sha to build when cloning (default: main)
+#   KAMAL_HOST        ssh target (required)
+#   KAMAL_SSH_USER    ssh user (default: root)
+#   REGISTRY_PORT     host port the local registry binds to (default: 5000)
+#
+# The image is pushed as `localhost:5000/freentonic:latest`; Kamal
+# pulls it from the same host so localhost is fine and Docker treats
+# localhost:5000 as an insecure-registry-by-default — no daemon
+# config required.
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+SIMPLEFREEN_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+REPO="${FREENTONIC_REPO:-https://github.com/GermanDZ/freentonic.git}"
+REF="${FREENTONIC_REF:-main}"
+HOST="${KAMAL_HOST:?set KAMAL_HOST to the deploy host}"
+SSH_USER="${KAMAL_SSH_USER:-root}"
+REGISTRY_PORT="${REGISTRY_PORT:-5000}"
+
+# Resolve source: explicit env > sibling checkout > git clone fallback.
+LOCAL_SRC="${FREENTONIC_SRC:-}"
+if [ -z "$LOCAL_SRC" ] && [ -d "$SIMPLEFREEN_DIR/../freentonic" ]; then
+  LOCAL_SRC="$(cd "$SIMPLEFREEN_DIR/../freentonic" && pwd)"
+fi
+
+if [ -n "$LOCAL_SRC" ] && [ ! -d "$LOCAL_SRC" ]; then
+  echo "[build-freentonic] FREENTONIC_SRC=$LOCAL_SRC not found" >&2
+  exit 2
+fi
+
+if [ -n "$LOCAL_SRC" ]; then
+  echo "[build-freentonic] host=$SSH_USER@$HOST source=local:$LOCAL_SRC"
+else
+  echo "[build-freentonic] host=$SSH_USER@$HOST source=git:$REPO ($REF)"
+fi
+
+# 1. Bootstrap the LXC: local registry, plus rsync if we're going to
+#    use it. Idempotent — safe to re-run on every deploy.
+ssh "$SSH_USER@$HOST" REGISTRY_PORT="$REGISTRY_PORT" NEED_RSYNC="${LOCAL_SRC:+1}" bash -s <<'REMOTE'
+set -euo pipefail
+
+if ! docker ps --format '{{.Names}}' | grep -q '^kamal-local-registry$'; then
+  echo "[build-freentonic] starting local registry on 127.0.0.1:${REGISTRY_PORT}"
+  docker run -d --restart=always \
+    --name kamal-local-registry \
+    -p "127.0.0.1:${REGISTRY_PORT}:5000" \
+    registry:2 >/dev/null
+fi
+
+if [ "${NEED_RSYNC:-}" = "1" ]; then
+  command -v rsync >/dev/null 2>&1 || { apt-get update -qq && apt-get install -y rsync; }
+else
+  command -v git >/dev/null 2>&1 || { apt-get update -qq && apt-get install -y git; }
+fi
+REMOTE
+
+# 2. Get source onto the LXC at /opt/freentonic-src.
+if [ -n "$LOCAL_SRC" ]; then
+  echo "[build-freentonic] rsyncing $LOCAL_SRC/ → $SSH_USER@$HOST:/opt/freentonic-src/"
+  # --delete makes the remote tree mirror local exactly, so removing a
+  # file locally also removes it on the LXC. Excludes keep the transfer
+  # tight: .git is large and irrelevant to docker build; tmp/log/bundle
+  # caches don't affect the image.
+  rsync -az --delete \
+    --exclude='.git/' \
+    --exclude='tmp/' \
+    --exclude='log/' \
+    --exclude='vendor/bundle/' \
+    --exclude='.bundle/' \
+    --exclude='node_modules/' \
+    --exclude='*.swp' \
+    "$LOCAL_SRC/" "$SSH_USER@$HOST:/opt/freentonic-src/"
+
+  # Determine a tag for the build. Prefer local git SHA + dirty marker;
+  # fall back to a timestamp if the source isn't a git checkout.
+  if [ -d "$LOCAL_SRC/.git" ]; then
+    SHA=$(git -C "$LOCAL_SRC" rev-parse --short HEAD)
+    if ! git -C "$LOCAL_SRC" diff --quiet HEAD 2>/dev/null; then
+      SHA="${SHA}-dirty"
+    fi
+  else
+    SHA="local-$(date -u +%Y%m%d%H%M%S)"
+  fi
+else
+  ssh "$SSH_USER@$HOST" REPO="$REPO" REF="$REF" bash -s <<'REMOTE'
+set -euo pipefail
+SRC_DIR=/opt/freentonic-src
+if [ ! -d "$SRC_DIR/.git" ]; then
+  echo "[build-freentonic] cloning $REPO ($REF) → $SRC_DIR"
+  rm -rf "$SRC_DIR"
+  git clone --depth 1 --branch "$REF" "$REPO" "$SRC_DIR"
+else
+  echo "[build-freentonic] fetching $REF in $SRC_DIR"
+  cd "$SRC_DIR"
+  git fetch --depth 1 origin "$REF"
+  git reset --hard FETCH_HEAD
+fi
+REMOTE
+  SHA=$(ssh "$SSH_USER@$HOST" 'git -C /opt/freentonic-src rev-parse --short HEAD')
+fi
+
+# 3. Build + push to the local registry.
+#
+# FREENTONIC_UID=10001 makes the freentonic user inside this image
+# match the simplefreen user — both containers share /workspace/runs
+# and /home/freentonic/workflows as named volumes, and Docker can only
+# enforce filesystem ownership at the uid level. Matching uids means
+# no cross-container chown/chmod reconciliation is needed at deploy.
+ssh "$SSH_USER@$HOST" REGISTRY_PORT="$REGISTRY_PORT" SHA="$SHA" bash -s <<'REMOTE'
+set -euo pipefail
+cd /opt/freentonic-src
+echo "[build-freentonic] building freentonic:$SHA"
+docker build \
+  --build-arg FREENTONIC_UID=10001 \
+  -t "localhost:${REGISTRY_PORT}/freentonic:latest" \
+  -t "localhost:${REGISTRY_PORT}/freentonic:${SHA}" \
+  .
+docker push "localhost:${REGISTRY_PORT}/freentonic:latest"
+docker push "localhost:${REGISTRY_PORT}/freentonic:${SHA}"
+echo "[build-freentonic] pushed freentonic:latest + freentonic:$SHA"
+REMOTE

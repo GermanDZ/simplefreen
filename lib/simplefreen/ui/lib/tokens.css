@@ -1,0 +1,213 @@
+/*
+ * Design tokens — semantic CSS custom properties used across the
+ * admin UI. Three layers:
+ *
+ *   1. :root defines the light defaults.
+ *   2. @media (prefers-color-scheme: dark) flips them when the OS
+ *      reports dark mode and no explicit data-theme is set.
+ *   3. [data-theme="light"] / [data-theme="dark"] on <html> force
+ *      a theme regardless of OS preference (added in Phase 4).
+ *
+ * Per-feature stylesheets are migrating to these tokens
+ * incrementally. New rules should reference vars; legacy literal
+ * values are still in styles.css until each feature is touched.
+ */
+
+:root {
+  /* Colors — surfaces */
+  --bg-app:           #f7f7f8;
+  --bg-app-login:     #f2f3f6;
+  --bg-surface:       #ffffff;
+  --bg-surface-muted: rgba(0, 0, 0, 0.02);
+
+  /* Colors — text */
+  --fg-default: #1b1b1c;
+  --fg-muted:   rgba(0, 0, 0, 0.7);
+  --fg-subtle:  rgba(0, 0, 0, 0.6);
+  --fg-faint:   rgba(0, 0, 0, 0.56);
+
+  /* Colors — borders */
+  --border-default: rgba(0, 0, 0, 0.08);
+  --border-strong:  rgba(0, 0, 0, 0.16);
+  --border-faint:   rgba(0, 0, 0, 0.06);
+
+  /* Brand / primary */
+  --brand:          #4573da;
+  --brand-strong:   #2453b8;
+  --brand-fg:       #ffffff;
+  --brand-soft-bg:  rgba(70, 130, 240, 0.12);
+  --brand-soft-fg:  #4573da;
+
+  /* State pills (idle/queued/running/ready/error/needs_reauth/browsed) */
+  --state-idle-bg:    rgba(140, 150, 170, 0.18);
+  --state-idle-fg:    inherit;
+  --state-queued-bg:  rgba(240, 180, 60, 0.20);
+  --state-queued-fg:  #a06700;
+  --state-running-bg: rgba(70, 130, 240, 0.20);
+  --state-running-fg: #3158a8;
+  --state-ready-bg:   rgba(80, 180, 100, 0.20);
+  --state-ready-fg:   #1f6b2f;
+  --state-error-bg:   rgba(220, 80, 80, 0.20);
+  --state-error-fg:   #8b2222;
+  --state-reauth-bg:  rgba(230, 120, 60, 0.25);
+  --state-reauth-fg:  #974300;
+  --state-browsed-bg: rgba(120, 100, 200, 0.18);
+  --state-browsed-fg: #4d3d96;
+
+  /* Inline error banner / login form */
+  --error-bg: rgba(220, 80, 80, 0.12);
+  --error-fg: #8b2222;
+
+  /* Code/log surfaces — intentionally dark in both themes */
+  --bg-code: #0c0c10;
+  --fg-code: #d8d9e0;
+
+  /* VNC password banner */
+  --vnc-bg: #ffe9a8;
+  --vnc-fg: #5c3e00;
+
+  /* Inputs */
+  --input-bg:     #ffffff;
+  --input-fg:     inherit;
+  --input-border: rgba(0, 0, 0, 0.16);
+
+  /* Spacing scale */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 28px;
+
+  /* Border radii */
+  --radius-sm:   4px;
+  --radius-md:   6px;
+  --radius-lg:   10px;
+  --radius-xl:   12px;
+  --radius-pill: 999px;
+
+  /* Font sizes */
+  --fs-xs:   11px;
+  --fs-sm:   12px;
+  --fs-base: 13px;
+  --fs-md:   14px;
+  --fs-lg:   16px;
+  --fs-xl:   20px;
+  --fs-xxl:  26px;
+
+  /* Font families */
+  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, system-ui, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, monospace;
+
+  /* Elevation */
+  --shadow-card:   0 18px 60px rgba(0, 0, 0, 0.06);
+
+  /* Semantic accent tokens — used by consolidation badges, kind
+     pills, confidence tiers, and warning kinds. Each accent has a
+     bg (badge fill), fg (foreground text on bg), and border
+     (subtle tint for left-accent cards). */
+  --accent-success-bg:     #2f8a55;
+  --accent-success-fg:     #ffffff;
+  --accent-success-border: rgba(47, 138, 85, 0.45);
+  --accent-success-soft:   rgba(47, 138, 85, 0.08);
+
+  --accent-warning-bg:     #c79430;
+  --accent-warning-fg:     #ffffff;
+  --accent-warning-border: rgba(199, 148, 48, 0.45);
+  --accent-warning-soft:   rgba(199, 148, 48, 0.08);
+
+  --accent-danger-bg:      #b3403e;
+  --accent-danger-fg:      #ffffff;
+  --accent-danger-border:  rgba(179, 64, 62, 0.45);
+  --accent-danger-soft:    rgba(179, 64, 62, 0.06);
+
+  --accent-purple-bg:      #5e479c;
+  --accent-purple-fg:      #ffffff;
+  --accent-purple-border:  rgba(94, 71, 156, 0.45);
+  --accent-purple-soft:    rgba(94, 71, 156, 0.08);
+
+  --accent-neutral-bg:     #8893ae;
+  --accent-neutral-fg:     #ffffff;
+  --accent-neutral-border: rgba(136, 147, 174, 0.45);
+  --accent-neutral-soft:   rgba(136, 147, 174, 0.08);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg-app:           #12131a;
+    --bg-app-login:     #12131a;
+    --bg-surface:       #1c1d26;
+    --bg-surface-muted: rgba(255, 255, 255, 0.03);
+
+    --fg-default: #e8e9ec;
+    --fg-muted:   rgba(255, 255, 255, 0.7);
+    --fg-subtle:  rgba(255, 255, 255, 0.6);
+    --fg-faint:   rgba(255, 255, 255, 0.56);
+
+    --border-default: #2a2b36;
+    --border-strong:  rgba(255, 255, 255, 0.18);
+    --border-faint:   rgba(255, 255, 255, 0.06);
+
+    --input-bg:     #141520;
+    --input-fg:     inherit;
+    --input-border: #2a2b36;
+
+    --state-idle-bg: #2a2b36;
+
+    --vnc-bg: #3a2f10;
+    --vnc-fg: #ffe9a8;
+
+    /* Dark-mode accent soft-fills need more opacity to be visible
+       against the dark surface; the bg/fg/border tokens stay
+       readable as-is because they're already saturated. */
+    --accent-success-soft:   rgba(47, 138, 85, 0.18);
+    --accent-warning-soft:   rgba(199, 148, 48, 0.18);
+    --accent-danger-soft:    rgba(179, 64, 62, 0.18);
+    --accent-purple-soft:    rgba(94, 71, 156, 0.18);
+    --accent-neutral-soft:   rgba(136, 147, 174, 0.16);
+  }
+}
+
+/* Explicit overrides win over the media query above. */
+[data-theme="light"] {
+  --bg-app:           #f7f7f8;
+  --bg-app-login:     #f2f3f6;
+  --bg-surface:       #ffffff;
+  --bg-surface-muted: rgba(0, 0, 0, 0.02);
+  --fg-default: #1b1b1c;
+  --fg-muted:   rgba(0, 0, 0, 0.7);
+  --fg-subtle:  rgba(0, 0, 0, 0.6);
+  --fg-faint:   rgba(0, 0, 0, 0.56);
+  --border-default: rgba(0, 0, 0, 0.08);
+  --border-strong:  rgba(0, 0, 0, 0.16);
+  --border-faint:   rgba(0, 0, 0, 0.06);
+  --input-bg:     #ffffff;
+  --input-border: rgba(0, 0, 0, 0.16);
+  --state-idle-bg: rgba(140, 150, 170, 0.18);
+  --vnc-bg: #ffe9a8;
+  --vnc-fg: #5c3e00;
+}
+
+[data-theme="dark"] {
+  --bg-app:           #12131a;
+  --bg-app-login:     #12131a;
+  --bg-surface:       #1c1d26;
+  --bg-surface-muted: rgba(255, 255, 255, 0.03);
+  --fg-default: #e8e9ec;
+  --fg-muted:   rgba(255, 255, 255, 0.7);
+  --fg-subtle:  rgba(255, 255, 255, 0.6);
+  --fg-faint:   rgba(255, 255, 255, 0.56);
+  --border-default: #2a2b36;
+  --border-strong:  rgba(255, 255, 255, 0.18);
+  --border-faint:   rgba(255, 255, 255, 0.06);
+  --input-bg:     #141520;
+  --input-border: #2a2b36;
+  --state-idle-bg: #2a2b36;
+  --vnc-bg: #3a2f10;
+  --vnc-fg: #ffe9a8;
+  --accent-success-soft: rgba(47, 138, 85, 0.18);
+  --accent-warning-soft: rgba(199, 148, 48, 0.18);
+  --accent-danger-soft:  rgba(179, 64, 62, 0.18);
+  --accent-purple-soft:  rgba(94, 71, 156, 0.18);
+  --accent-neutral-soft: rgba(136, 147, 174, 0.16);
+}

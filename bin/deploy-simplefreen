@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+# bin/deploy-simplefreen — rebuild + deploy simplefreen (the umbrella
+# app + its freentonic accessory).
+#
+# This is the one-shot equivalent of `cd simplefreen && kamal deploy`:
+# Kamal's pre-deploy hook (`.kamal/hooks/pre-deploy`) builds freentonic
+# on the LXC, then Kamal builds simplefreen via its own builder and
+# rolls the containers.
+#
+# Skip the freentonic rebuild on app-only iterations:
+#   SKIP_FREENTONIC_BUILD=1 bin/deploy-simplefreen
+#
+# Extra args are forwarded to `kamal deploy`, e.g.:
+#   bin/deploy-simplefreen --skip-push
+#
+# Run from anywhere — the script cd's to the simplefreen project root.
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+cd "$SCRIPT_DIR/.."
+
+exec kamal deploy "$@"

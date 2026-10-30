@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+# Reboot the freentonic accessory iff its image in the LXC's local
+# registry no longer matches the running container. Without this,
+# `kamal deploy` rebuilds freentonic via the pre-deploy hook but never
+# recreates the accessory (same `:latest` tag = Kamal sees no change),
+# leaving the stale container running.
+#
+# Skip when SKIP_FREENTONIC_BUILD=1: pre-deploy didn't touch the image
+# either, so there's nothing new to pick up.
+
+set -euo pipefail
+
+if [ "${SKIP_FREENTONIC_BUILD:-0}" = "1" ]; then
+  echo "[post-deploy] SKIP_FREENTONIC_BUILD=1 — freentonic image not rebuilt, skipping reboot check"
+  exit 0
+fi
+
+HOST="${KAMAL_HOST:?set KAMAL_HOST to the deploy host}"
+SSH_USER="${KAMAL_SSH_USER:-root}"
+
+# Fetch both digests in one SSH round-trip. Each command falls back to
+# "missing" so the hook never aborts on a fresh LXC where the accessory
+# or the image hasn't been seen yet.
+read -r RUNNING REGISTRY <<<"$(ssh "$SSH_USER@$HOST" bash -s <<'REMOTE'
+set -euo pipefail
+running=$(docker inspect simplefreen-freentonic --format '{{.Image}}' 2>/dev/null || echo "missing")
+registry=$(docker image inspect localhost:5000/freentonic:latest --format '{{.Id}}' 2>/dev/null || echo "missing")
+echo "$running $registry"
+REMOTE
+)"
+
+if [ "$REGISTRY" = "missing" ]; then
+  echo "[post-deploy] localhost:5000/freentonic:latest not present on LXC — skipping reboot (run bin/build-freentonic-image first)"
+  exit 0
+fi
+
+if [ "$RUNNING" = "$REGISTRY" ]; then
+  echo "[post-deploy] freentonic image unchanged (${RUNNING}) — no reboot needed"
+  exit 0
+fi
+
+echo "[post-deploy] freentonic image changed (running=${RUNNING} → registry=${REGISTRY}) — rebooting accessory"
+kamal accessory reboot freentonic

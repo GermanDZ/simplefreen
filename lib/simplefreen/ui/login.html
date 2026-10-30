@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Freentonic — Admin</title>
+  <link rel="icon" type="image/svg+xml" href="/admin/assets/favicon.svg">
+  <link rel="stylesheet" href="/admin/assets/lib/tokens.css">
+  <link rel="stylesheet" href="/admin/assets/styles.css">
+  <script src="/admin/assets/lib/boot.js"></script>
+</head>
+<body class="login">
+  <main>
+    <h1>Freentonic</h1>
+    <p class="sub">SimpleFIN bridge — admin sign-in</p>
+    <p class="err" id="login-error" hidden>Incorrect password</p>
+    <form method="post" action="/admin/login">
+      <label>Admin password
+        <input type="password" name="password" autofocus required>
+      </label>
+      <button type="submit">Sign in</button>
+    </form>
+  </main>
+</body>
+</html>

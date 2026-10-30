@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+# Build the freentonic accessory image on the target LXC before the
+# main deploy. Kamal pulls accessories from a registry; we use a
+# host-local registry on the LXC so we never have to push large
+# Chrome-laden images over the LAN.
+#
+# Skip the build when only the simplefreen app is being deployed and
+# freentonic hasn't changed: set SKIP_FREENTONIC_BUILD=1 in your env.
+#
+# Volume ownership note: simplefreen (uid 10001) and freentonic (built
+# here with FREENTONIC_UID=10001 in bin/build-freentonic-image) share
+# the same uid by construction, so simplefreen_workflows, simplefreen_runs
+# and simplefreen_freentonic_chrome all converge on a single owner.
+# No per-deploy chown/chmod reconciliation needed — the configuration
+# is the fix.
+
+set -euo pipefail
+
+# Ensure kamal-proxy on the LXC only publishes :80. TLS is terminated
+# off-host by the edge Caddy, so kamal-proxy stays HTTP-only; the
+# default kamal-proxy options would also grab :443, which we don't want.
+HOST="${KAMAL_HOST:?set KAMAL_HOST to the deploy host}"
+SSH_USER="${KAMAL_SSH_USER:-root}"
+ssh "$SSH_USER@$HOST" bash -s <<'REMOTE'
+set -euo pipefail
+mkdir -p .kamal/proxy
+desired='--publish 80:80 --log-opt max-size=10m'
+existing=$(cat .kamal/proxy/options 2>/dev/null || true)
+if [ "$existing" != "$desired" ]; then
+  echo "[pre-deploy] writing .kamal/proxy/options (HTTP-only; edge Caddy does TLS)"
+  printf '%s\n' "$desired" > .kamal/proxy/options
+fi
+REMOTE
+
+if [ "${SKIP_FREENTONIC_BUILD:-0}" = "1" ]; then
+  echo "[pre-deploy] SKIP_FREENTONIC_BUILD=1 — skipping freentonic build"
+  exit 0
+fi
+
+exec "$(dirname "$0")/../../bin/build-freentonic-image"

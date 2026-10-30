@@ -1,0 +1,306 @@
+#!/usr/bin/env bash
+# Run simplefreen on the host while keeping freentonic + Caddy in
+# containers. See docs/development.md § "Native-host dev loop".
+#
+# Layout — all dev-local artifacts live under dev/, which is gitignored
+# as a unit so the repo root stays clean:
+#
+#   dev/
+#     docker-compose.yml          # copy of examples/
+#     docker-compose.native.yml   # copy of examples/
+#     Caddyfile                   # copy of examples/
+#     .env                        # secrets, mode 0600
+#     data/
+#       simplefreen/              # state dir (profiles, cache, runs metadata)
+#       freentonic-runs/          # bind-mount target for freentonic's run output
+#       freentonic-workflows/     # workflow YAMLs (if not pointing elsewhere)
+#
+# Auto-bootstraps on first run (and migrates any legacy root-level dev
+# files into dev/ if they exist).
+#
+# Usage:
+#   bin/dev-native [options] [-- ruby-args...]
+#
+# Options:
+#   --recreate, -r    Force-recreate the freentonic + caddy containers
+#                     under the canonical `simplefreen` compose project
+#                     before launching. Use this after editing compose
+#                     files, .env, or rebuilding either image.
+#   --down            Tear down freentonic + caddy and exit.
+#   -h, --help        This.
+
+set -euo pipefail
+
+cd "$(dirname "$0")/.."
+
+DEV_DIR="${DEV_DIR:-dev}"
+
+# Pin compose project so commands run from any cwd land on the same
+# containers / volumes / networks. Without this, an earlier
+# `cd examples && docker compose up` would have created containers
+# under project=examples; later commands from the repo root would
+# create new ones under project=simplefreen. Same compose files,
+# two stacks, diverging mounts.
+export COMPOSE_PROJECT_NAME="${COMPOSE_PROJECT_NAME:-simplefreen}"
+
+# ─── Argument parsing ─────────────────────────────────────────
+recreate=0
+down=0
+ruby_args=()
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -r|--recreate) recreate=1; shift ;;
+    --down)        down=1;     shift ;;
+    -h|--help)
+      sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//'
+      exit 0
+      ;;
+    --) shift; ruby_args+=("$@"); break ;;
+    *)  ruby_args+=("$1"); shift ;;
+  esac
+done
+
+# ─── Migration + bootstrap ────────────────────────────────────
+# One-time migration of legacy root-level dev files into dev/. Safe
+# (the destination doesn't exist yet), atomic per-file. After this,
+# /dev/ is gitignored so the repo root stays clean.
+migrate_legacy() {
+  local migrated=0
+
+  # First-time bootstrap of dev/: move root-level dev files in.
+  if [[ ! -d "$DEV_DIR" ]]; then
+    mkdir -p "$DEV_DIR/data"
+    for f in docker-compose.yml docker-compose.native.yml Caddyfile .env; do
+      if [[ -f "$f" ]]; then
+        mv "$f" "$DEV_DIR/$f"
+        echo "[dev-native] migrated ./$f → $DEV_DIR/$f"
+        migrated=1
+      fi
+    done
+    # Map legacy directory names to the canonical names the runtime
+    # reads. simplefreen-data becomes simplefreen (the -data suffix
+    # was redundant once dev/data/ became the parent).
+    declare -A dir_map=(
+      [simplefreen-data]=simplefreen
+      [freentonic-runs]=freentonic-runs
+      [freentonic-workflows]=freentonic-workflows
+    )
+    for d in "${!dir_map[@]}"; do
+      if [[ -d "$d" && ! -L "$d" ]]; then
+        mv "$d" "$DEV_DIR/data/${dir_map[$d]}"
+        echo "[dev-native] migrated ./$d/ → $DEV_DIR/data/${dir_map[$d]}/"
+        migrated=1
+      fi
+    done
+  fi
+
+  # Recovery for users who already ran an older bin/dev-native that
+  # left their state at `dev/data/simplefreen-data/`. Move it into the
+  # canonical `dev/data/simplefreen/` only if the canonical dir is
+  # absent or empty — never clobber existing state.
+  if [[ -d "$DEV_DIR/data/simplefreen-data" ]]; then
+    if [[ ! -e "$DEV_DIR/data/simplefreen" ]] || \
+       [[ -d "$DEV_DIR/data/simplefreen" && -z "$(ls -A "$DEV_DIR/data/simplefreen" 2>/dev/null)" ]]; then
+      rm -rf "$DEV_DIR/data/simplefreen" 2>/dev/null || true
+      mv "$DEV_DIR/data/simplefreen-data" "$DEV_DIR/data/simplefreen"
+      echo "[dev-native] recovered $DEV_DIR/data/simplefreen-data → $DEV_DIR/data/simplefreen"
+      migrated=1
+    else
+      echo "[dev-native] WARNING: both $DEV_DIR/data/simplefreen-data and $DEV_DIR/data/simplefreen exist with content — leaving both alone, manual review needed"
+    fi
+  fi
+
+  # `[[ … ]] && echo` evaluates to false when nothing migrated, which
+  # under `set -e` would silently exit the whole script (and silent
+  # exits are the worst kind). Use an explicit if-block instead.
+  if [[ $migrated -eq 1 ]]; then echo; fi
+}
+
+# Bootstrap any missing pieces from examples/. Idempotent — only
+# creates files that don't already exist, so re-running is safe.
+bootstrap() {
+  mkdir -p "$DEV_DIR/data"
+  for f in docker-compose.yml docker-compose.native.yml Caddyfile; do
+    if [[ ! -f "$DEV_DIR/$f" ]]; then
+      cp "examples/$f" "$DEV_DIR/$f"
+      echo "[dev-native] copied examples/$f → $DEV_DIR/$f"
+    fi
+  done
+
+  if [[ ! -f "$DEV_DIR/.env" ]]; then
+    if ! command -v ruby >/dev/null; then
+      echo "error: ruby not on PATH — needed to mint $DEV_DIR/.env" >&2
+      exit 1
+    fi
+    if ! command -v openssl >/dev/null; then
+      echo "error: openssl not on PATH — needed to mint $DEV_DIR/.env" >&2
+      exit 1
+    fi
+    local secrets_key admin_pw invoke_token
+    secrets_key=$(ruby -rsecurerandom -rbase64 -e 'puts Base64.strict_encode64(SecureRandom.random_bytes(32))')
+    admin_pw=$(ruby -rsecurerandom -e 'puts SecureRandom.base64(24)')
+    invoke_token=$(openssl rand -hex 32)
+    umask 077
+    {
+      echo "# Minted by bin/dev-native — secrets are gitignored under /dev/."
+      echo "SIMPLEFREEN_SECRETS_KEY=${secrets_key}"
+      echo "SIMPLEFREEN_ADMIN_PASSWORD=${admin_pw}"
+      echo "FREENTONIC_INVOKE_TOKEN=${invoke_token}"
+      echo
+      echo "# Optional — point at a freentonic-providers clone elsewhere"
+      echo "# on disk; if unset, defaults to dev/data/freentonic-workflows/"
+      echo "# (which the admin UI's '↻ Refresh workflows' button can"
+      echo "# populate from GitHub)."
+      echo "# FREENTONIC_WORKFLOWS_DIR=/path/to/freentonic-providers"
+    } > "$DEV_DIR/.env"
+    chmod 600 "$DEV_DIR/.env"
+    echo "[dev-native] minted $DEV_DIR/.env (admin password is in there — grep it out when needed)"
+  fi
+}
+
+migrate_legacy
+bootstrap
+
+compose_files=(-f "$DEV_DIR/docker-compose.yml" -f "$DEV_DIR/docker-compose.native.yml")
+
+# Stop a stale wrong-project stack if one's still alive (left over
+# from `cd examples && docker compose up` from before
+# COMPOSE_PROJECT_NAME was pinned). Otherwise its containers squat on
+# host ports and the freshly-recreated ones can't bind.
+stop_orphan_projects() {
+  for stale in examples; do
+    if docker compose -p "$stale" "${compose_files[@]}" ps --format '{{.Name}}' 2>/dev/null | grep -q .; then
+      echo "[dev-native] stopping orphan compose project '$stale' (legacy from before COMPOSE_PROJECT_NAME pinned)"
+      docker compose -p "$stale" "${compose_files[@]}" down --remove-orphans 2>&1 | sed 's/^/[dev-native]   /'
+    fi
+  done
+}
+
+if [[ $down -eq 1 ]]; then
+  stop_orphan_projects
+  echo "[dev-native] tearing down ${COMPOSE_PROJECT_NAME} compose stack"
+  docker compose "${compose_files[@]}" down 2>&1 | sed 's/^/[dev-native]   /'
+  exit 0
+fi
+
+if [[ $recreate -eq 1 ]]; then
+  stop_orphan_projects
+  echo "[dev-native] (re)creating freentonic + caddy under project=${COMPOSE_PROJECT_NAME}"
+  docker compose "${compose_files[@]}" up -d --force-recreate freentonic caddy 2>&1 | sed 's/^/[dev-native]   /'
+  sleep 2
+fi
+
+# Load secrets out of dev/.env without echoing them.
+set -a
+# shellcheck disable=SC1091
+source "$DEV_DIR/.env"
+set +a
+
+# Required env, derived from the in-container compose defaults but
+# pointed at the host filesystem under dev/data/ and at freentonic's
+# published port. Listen on 0.0.0.0 so Caddy (in its container) can
+# reach in via host.docker.internal:7777 — that hostname resolves to
+# the host's Docker bridge IP, NOT loopback, so a 127.0.0.1-only
+# listener is unreachable from the container.
+export SIMPLEFREEN_LISTEN_ADDR="${SIMPLEFREEN_LISTEN_ADDR:-0.0.0.0}"
+export SIMPLEFREEN_LISTEN_PORT="${SIMPLEFREEN_LISTEN_PORT:-7777}"
+export SIMPLEFREEN_PUBLIC_URL="${SIMPLEFREEN_PUBLIC_URL:-https://simplefreen.localhost}"
+export SIMPLEFREEN_INTERNAL_PUSH_URL="${SIMPLEFREEN_INTERNAL_PUSH_URL:-http://host.docker.internal:${SIMPLEFREEN_LISTEN_PORT}}"
+export SIMPLEFREEN_ROOT="${SIMPLEFREEN_ROOT:-$PWD/$DEV_DIR/data/simplefreen}"
+export SIMPLEFREEN_WORKFLOWS_DIR="${SIMPLEFREEN_WORKFLOWS_DIR:-${FREENTONIC_WORKFLOWS_DIR:-$PWD/$DEV_DIR/data/freentonic-workflows}}"
+# Match dev/docker-compose.yml's mount source: it uses
+# `${FREENTONIC_RUNS_DIR:-./freentonic-runs}` from the `dev/` directory.
+# An earlier default here pointed at `data/freentonic-runs/`, which
+# diverged from the compose mount and made the host-side artifacts
+# directory empty (so recording transcripts and run artifacts couldn't
+# be located by simplefreen even though freentonic was writing them
+# correctly to the container path mapped one level up).
+export SIMPLEFREEN_RUNS_ARTIFACTS_DIR="${SIMPLEFREEN_RUNS_ARTIFACTS_DIR:-${FREENTONIC_RUNS_DIR:-$PWD/$DEV_DIR/freentonic-runs}}"
+export SIMPLEFREEN_FREENTONIC_HEALTH_INTERVAL_SECONDS="${SIMPLEFREEN_FREENTONIC_HEALTH_INTERVAL_SECONDS:-20}"
+
+# freentonic is reachable on the host via its published port.
+export FREENTONIC_URL="${FREENTONIC_URL_NATIVE:-http://localhost:7878}"
+
+mkdir -p "$SIMPLEFREEN_ROOT" "$SIMPLEFREEN_RUNS_ARTIFACTS_DIR"
+mkdir -p "$SIMPLEFREEN_WORKFLOWS_DIR" 2>/dev/null || true
+
+# ─── Pre-flight checks ────────────────────────────────────────
+preflight_warn() { printf "[dev-native] \033[33m⚠\033[0m  %s\n" "$1"; }
+preflight_ok()   { printf "[dev-native] \033[32m✓\033[0m  %s\n" "$1"; }
+
+if curl -sf -o /dev/null --max-time 2 "${FREENTONIC_URL}/healthz"; then
+  preflight_ok "freentonic reachable at ${FREENTONIC_URL}/healthz"
+else
+  preflight_warn "cannot reach ${FREENTONIC_URL}/healthz — freentonic container down?"
+  preflight_warn "  fix: bin/dev-native --recreate"
+fi
+
+if [[ -d "${SIMPLEFREEN_WORKFLOWS_DIR}" ]] && \
+   [[ -n "$(find "${SIMPLEFREEN_WORKFLOWS_DIR}" -maxdepth 2 -name workflow.yml -print -quit 2>/dev/null)" ]]; then
+  count=$(find "${SIMPLEFREEN_WORKFLOWS_DIR}" -maxdepth 2 -name workflow.yml | wc -l | tr -d ' ')
+  preflight_ok "workflows: ${count} provider(s) under ${SIMPLEFREEN_WORKFLOWS_DIR}"
+else
+  preflight_warn "no <slug>/workflow.yml under ${SIMPLEFREEN_WORKFLOWS_DIR} — admin dropdown will be empty"
+  preflight_warn "  fix: click \"↻ Refresh workflows\" in the admin UI, or set FREENTONIC_WORKFLOWS_DIR in $DEV_DIR/.env"
+fi
+
+freentonic_workflows_mount=$(docker inspect freentonic --format '{{range .Mounts}}{{if eq .Destination "/home/freentonic/workflows"}}{{.Source}}{{end}}{{end}}' 2>/dev/null)
+if [[ -n "$freentonic_workflows_mount" ]]; then
+  if [[ "$freentonic_workflows_mount" == "$SIMPLEFREEN_WORKFLOWS_DIR" ]]; then
+    preflight_ok "freentonic workflows mount: ${freentonic_workflows_mount} (matches host view)"
+  else
+    preflight_warn "freentonic mounts ${freentonic_workflows_mount} but this script reads ${SIMPLEFREEN_WORKFLOWS_DIR}"
+    preflight_warn "  fix: bin/dev-native --recreate   (re-bind under project=${COMPOSE_PROJECT_NAME})"
+  fi
+fi
+
+# Same drift check for the runs/artifacts mount. simplefreen reads
+# screenshots, recording.jsonl, and per-run output from this dir; if it
+# disagrees with what the freentonic container has bind-mounted, the
+# admin UI will silently miss artifacts and recordings.
+freentonic_runs_mount=$(docker inspect freentonic --format '{{range .Mounts}}{{if eq .Destination "/workspace/runs"}}{{.Source}}{{end}}{{end}}' 2>/dev/null)
+if [[ -n "$freentonic_runs_mount" ]]; then
+  if [[ "$freentonic_runs_mount" == "$SIMPLEFREEN_RUNS_ARTIFACTS_DIR" ]]; then
+    preflight_ok "freentonic runs mount: ${freentonic_runs_mount} (matches host view)"
+  else
+    preflight_warn "freentonic mounts ${freentonic_runs_mount} but this script reads ${SIMPLEFREEN_RUNS_ARTIFACTS_DIR}"
+    preflight_warn "  fix: set FREENTONIC_RUNS_DIR=${freentonic_runs_mount} in $DEV_DIR/.env, or run bin/dev-native --recreate"
+  fi
+fi
+
+caddy_backend=$(docker inspect simplefreen-caddy --format '{{range .Config.Env}}{{println .}}{{end}}' 2>/dev/null | awk -F= '/^SIMPLEFREEN_BACKEND=/{print $2}')
+if [[ -z "$caddy_backend" ]]; then
+  preflight_warn "Caddy is running with the default backend (\`simplefreen:7878\`) — it cannot reach this host process."
+  preflight_warn "  fix: bin/dev-native --recreate"
+elif [[ "$caddy_backend" != "host.docker.internal:${SIMPLEFREEN_LISTEN_PORT}" ]]; then
+  preflight_warn "Caddy SIMPLEFREEN_BACKEND=${caddy_backend} but this script listens on :${SIMPLEFREEN_LISTEN_PORT}. Mismatch will 502."
+else
+  preflight_ok "Caddy backend: ${caddy_backend} (matches our listener)"
+fi
+
+if [[ "$SIMPLEFREEN_LISTEN_ADDR" == "127.0.0.1" || "$SIMPLEFREEN_LISTEN_ADDR" == "localhost" ]] && \
+   [[ "$caddy_backend" == host.docker.internal:* ]]; then
+  preflight_warn "listening on $SIMPLEFREEN_LISTEN_ADDR (loopback only) but Caddy reaches in via host.docker.internal — container can't connect."
+  preflight_warn "  fix: unset SIMPLEFREEN_LISTEN_ADDR (default 0.0.0.0) or set it explicitly."
+fi
+
+if lsof -nP -i ":${SIMPLEFREEN_LISTEN_PORT}" -sTCP:LISTEN >/dev/null 2>&1; then
+  preflight_warn "port ${SIMPLEFREEN_LISTEN_PORT} already in use — another dev-native? Ruby will fail to bind."
+  lsof -nP -i ":${SIMPLEFREEN_LISTEN_PORT}" -sTCP:LISTEN | tail -n +1 | sed 's/^/[dev-native]   /'
+fi
+echo
+
+cat <<EOF
+[dev-native] launching simplefreen on host
+  compose project  : ${COMPOSE_PROJECT_NAME}
+  dev dir          : $PWD/$DEV_DIR
+  listen           : ${SIMPLEFREEN_LISTEN_ADDR}:${SIMPLEFREEN_LISTEN_PORT}
+  public url       : ${SIMPLEFREEN_PUBLIC_URL}      (Caddy at 127.0.0.1:443 → host.docker.internal:${SIMPLEFREEN_LISTEN_PORT})
+  internal push    : ${SIMPLEFREEN_INTERNAL_PUSH_URL}
+  freentonic url   : ${FREENTONIC_URL}
+  state root       : ${SIMPLEFREEN_ROOT}
+  workflows dir    : ${SIMPLEFREEN_WORKFLOWS_DIR}
+  runs artifacts   : ${SIMPLEFREEN_RUNS_ARTIFACTS_DIR}
+EOF
+
+exec bundle exec ruby bin/simplefreen "${ruby_args[@]}"

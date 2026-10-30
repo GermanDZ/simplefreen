@@ -1,0 +1,149 @@
+#!/usr/bin/env bash
+# sure/bin/rebuild — build a fresh sure-finances image directly on the
+# LXC and push it to the host-local Docker registry. Pair with
+# `kamal app boot` to roll containers onto the new image.
+#
+# Why not `kamal deploy`: Kamal's remote buildx driver runs buildkit
+# inside its own container, which can't reach the LXC's loopback
+# registry at 127.0.0.1:5000. Building via the LXC's daemon directly
+# (no buildkit-in-a-container) sidesteps the network isolation
+# entirely. Same pattern as ../bin/build-freentonic-image.
+#
+# Source selection (first match wins):
+#   1. $SURE_SRC — explicit path to a local sure-finances checkout
+#   2. ../../sure-finances relative to this script — sibling default
+#   3. git clone from $SURE_REPO at $SURE_REF — fallback for fresh
+#      hosts that don't have a local checkout
+#
+# Env:
+#   SURE_SRC        local path to sync (default: ../../sure-finances if present)
+#   SURE_REPO       git URL to clone if no local source
+#                   (default: https://github.com/we-promise/sure.git)
+#   SURE_REF        branch/tag/sha to build when cloning (default: main)
+#   KAMAL_HOST      ssh target (required)
+#   KAMAL_SSH_USER  ssh user (default: root)
+#   REGISTRY_PORT   host port the local registry binds to (default: 5000)
+#
+# Typical upgrade flow:
+#   (cd ../../sure-finances && git fetch && git checkout <ref>)
+#   bin/backup-db before-upgrade
+#   bin/rebuild
+#   kamal app boot
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+SURE_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+REPO="${SURE_REPO:-https://github.com/we-promise/sure.git}"
+REF="${SURE_REF:-main}"
+HOST="${KAMAL_HOST:?set KAMAL_HOST to the deploy host}"
+SSH_USER="${KAMAL_SSH_USER:-root}"
+REGISTRY_PORT="${REGISTRY_PORT:-5000}"
+
+# Resolve source: explicit env > sibling checkout > git clone fallback.
+LOCAL_SRC="${SURE_SRC:-}"
+if [ -z "$LOCAL_SRC" ] && [ -d "$SURE_DIR/../../sure-finances" ]; then
+  LOCAL_SRC="$(cd "$SURE_DIR/../../sure-finances" && pwd)"
+fi
+
+if [ -n "$LOCAL_SRC" ] && [ ! -d "$LOCAL_SRC" ]; then
+  echo "[rebuild] SURE_SRC=$LOCAL_SRC not found" >&2
+  exit 2
+fi
+
+if [ -n "$LOCAL_SRC" ]; then
+  echo "[rebuild] host=$SSH_USER@$HOST source=local:$LOCAL_SRC"
+else
+  echo "[rebuild] host=$SSH_USER@$HOST source=git:$REPO ($REF)"
+fi
+
+# 1. Bootstrap the LXC: ensure local registry is up, plus rsync if we
+#    plan to use it. Idempotent — safe to re-run on every rebuild.
+ssh "$SSH_USER@$HOST" REGISTRY_PORT="$REGISTRY_PORT" NEED_RSYNC="${LOCAL_SRC:+1}" bash -s <<'REMOTE'
+set -euo pipefail
+
+if ! docker ps --format '{{.Names}}' | grep -q '^kamal-local-registry$'; then
+  echo "[rebuild] starting local registry on 127.0.0.1:${REGISTRY_PORT}"
+  docker run -d --restart=always \
+    --name kamal-local-registry \
+    -p "127.0.0.1:${REGISTRY_PORT}:5000" \
+    registry:2 >/dev/null
+fi
+
+if [ "${NEED_RSYNC:-}" = "1" ]; then
+  command -v rsync >/dev/null 2>&1 || { apt-get update -qq && apt-get install -y rsync; }
+else
+  command -v git >/dev/null 2>&1 || { apt-get update -qq && apt-get install -y git; }
+fi
+REMOTE
+
+# 2. Get source onto the LXC at /opt/sure-finances-src.
+if [ -n "$LOCAL_SRC" ]; then
+  echo "[rebuild] rsyncing $LOCAL_SRC/ → $SSH_USER@$HOST:/opt/sure-finances-src/"
+  # --delete mirrors removals; excludes keep the transfer tight — none
+  # of these affect the Docker build context that the Dockerfile uses.
+  rsync -az --delete \
+    --exclude='.git/' \
+    --exclude='tmp/' \
+    --exclude='log/' \
+    --exclude='vendor/bundle/' \
+    --exclude='.bundle/' \
+    --exclude='node_modules/' \
+    --exclude='storage/' \
+    --exclude='public/assets/' \
+    --exclude='public/packs/' \
+    --exclude='backups/' \
+    --exclude='*.swp' \
+    "$LOCAL_SRC/" "$SSH_USER@$HOST:/opt/sure-finances-src/"
+
+  # Tag with local git SHA + dirty marker, or timestamp if not git.
+  if [ -d "$LOCAL_SRC/.git" ]; then
+    SHA=$(git -C "$LOCAL_SRC" rev-parse --short HEAD)
+    if ! git -C "$LOCAL_SRC" diff --quiet HEAD 2>/dev/null; then
+      SHA="${SHA}-dirty"
+    fi
+  else
+    SHA="local-$(date -u +%Y%m%d%H%M%S)"
+  fi
+else
+  ssh "$SSH_USER@$HOST" REPO="$REPO" REF="$REF" bash -s <<'REMOTE'
+set -euo pipefail
+SRC_DIR=/opt/sure-finances-src
+if [ ! -d "$SRC_DIR/.git" ]; then
+  echo "[rebuild] cloning $REPO ($REF) → $SRC_DIR"
+  rm -rf "$SRC_DIR"
+  git clone --depth 1 --branch "$REF" "$REPO" "$SRC_DIR"
+else
+  echo "[rebuild] fetching $REF in $SRC_DIR"
+  cd "$SRC_DIR"
+  git fetch --depth 1 origin "$REF"
+  git reset --hard FETCH_HEAD
+fi
+REMOTE
+  SHA=$(ssh "$SSH_USER@$HOST" 'git -C /opt/sure-finances-src rev-parse --short HEAD')
+fi
+
+# 3. Build + push to the local registry. Plain `docker build` on the
+# LXC daemon, not buildx — daemon-side networking reaches the
+# registry at 127.0.0.1:5000 just fine.
+ssh "$SSH_USER@$HOST" REGISTRY_PORT="$REGISTRY_PORT" SHA="$SHA" bash -s <<'REMOTE'
+set -euo pipefail
+cd /opt/sure-finances-src
+echo "[rebuild] building sure-finances:$SHA"
+docker build \
+  -t "127.0.0.1:${REGISTRY_PORT}/sure-finances:latest" \
+  -t "127.0.0.1:${REGISTRY_PORT}/sure-finances:${SHA}" \
+  .
+docker push "127.0.0.1:${REGISTRY_PORT}/sure-finances:latest"
+docker push "127.0.0.1:${REGISTRY_PORT}/sure-finances:${SHA}"
+echo "[rebuild] pushed sure-finances:latest + sure-finances:$SHA"
+REMOTE
+
+cat >&2 <<NEXT
+
+[rebuild] done. Roll containers onto the new image with:
+  kamal app boot
+
+(or stop first if you want a clean replacement: kamal app stop && kamal app boot)
+NEXT

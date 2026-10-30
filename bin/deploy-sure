@@ -1,0 +1,47 @@
+#!/usr/bin/env bash
+# bin/deploy-sure — rebuild + roll sure-finances on the LXC.
+#
+# Sequence:
+#   1. pg_dump the prod DB to sure/backups/sure-<ts>-pre-deploy.dump
+#      (so you can roll back with sure/bin/restore-db if a migration
+#      goes sideways).
+#   2. sure/bin/rebuild: SSH to the LXC, build a fresh image with
+#      plain `docker build`, push to the host-local registry. The
+#      sibling sure-finances clone at ../sure-finances/
+#      is the build context — pin a ref there to control what ships
+#      (or set SURE_SRC / SURE_REPO / SURE_REF, see bin/rebuild).
+#   3. kamal app stop && kamal app boot: roll the running containers
+#      onto the new image. (We don't use `kamal deploy` because
+#      Kamal's remote buildx can't reach the LXC's loopback registry
+#      from inside its own network namespace — see sure/README.md.)
+#
+# Skip the backup with `SKIP_BACKUP=1 bin/deploy-sure` (rare — really
+# only useful when you're already holding a recent dump).
+#
+# Run from anywhere — the script cd's to simplefreen/sure/.
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+SURE_DIR="$SCRIPT_DIR/../sure"
+cd "$SURE_DIR"
+
+if [ "${SKIP_BACKUP:-0}" != "1" ]; then
+  echo "[deploy-sure] backing up prod DB before rebuild..."
+  bin/backup-db pre-deploy
+fi
+
+echo "[deploy-sure] rebuilding image on LXC..."
+bin/rebuild
+
+echo "[deploy-sure] rolling containers..."
+kamal app stop
+kamal app boot
+
+cat >&2 <<DONE
+
+[deploy-sure] done. Check:
+  kamal app logs -f                 # tail web
+  kamal app logs -r worker -f       # tail Sidekiq
+  curl https://$SURE_HOST/up   # health
+DONE

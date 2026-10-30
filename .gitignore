@@ -1,0 +1,33 @@
+/.bundle/
+/coverage/
+/pkg/
+/spec/reports/
+/tmp/
+Gemfile.lock
+*.gem
+.DS_Store
+
+# Native-host dev loop — `bin/dev-native` bootstraps + uses this dir
+# for compose copies, secrets (.env), and on-disk state. Single
+# top-level dir keeps the repo root clean.
+/dev/
+
+# Kamal secrets files — populated locally, never committed. Matches
+# any project's .kamal/secrets at any depth (root, sure/, future ones).
+**/.kamal/secrets
+
+# sure-finances DB dumps — created by sure/bin/backup-db. Keep the
+# directory tracked (via .gitkeep), ignore the dump payloads.
+/sure/backups/*
+!/sure/backups/.gitkeep
+
+# Caddy's internal-CA root, extracted from simplefreen-caddy. Not
+# strictly secret, but the bundle is per-install and the deploy
+# recipe re-extracts it; no point committing.
+/sure/caddy-root.crt
+
+
+# Host-specific deploy values (KAMAL_HOST, SIMPLEFREEN_HOST, SURE_HOST)
+# read by config/deploy.yml, sure/config/deploy.yml and the ops scripts.
+.envrc
+__pycache__/
