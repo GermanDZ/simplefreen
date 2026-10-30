@@ -49,6 +49,14 @@ work. Cross-repo: the Browse-mode admin button requires the
   `Referer` headers. Requires a noVNC that reads fragment settings
   (`WebUtil.getConfigVar`); v1.5.0, which freentonic pins, does.
 
+### Fixed
+
+- **Logs reach `docker logs` live.** Under Docker stdout is a pipe, which
+  Ruby block-buffers, so lines from the scheduler, push receiver, health
+  probe and watchdog sat in the buffer until it filled or the process
+  exited (they all appeared at once on shutdown). `bin/simplefreen` now
+  sets `$stdout.sync = true`.
+
 ### Fixed (reliability + security review 2026-07-04)
 
 - **Scheduler worker no longer dies on an unexpected exception.** A

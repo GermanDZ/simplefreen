@@ -23,6 +23,10 @@ OptionParser.new do |opts|
   opts.on("--version") { puts "simplefreen #{Simplefreen::VERSION}"; exit 0 }
 end.parse!(ARGV)
 
+# Under Docker stdout is a pipe, which Ruby block-buffers — log lines
+# (push accepted, scheduler, watchdog) would sit in the buffer until it
+# fills or the process exits, so `docker logs` showed nothing live.
+$stdout.sync = true
 logger = ->(msg) { $stdout.puts(msg) }
 
 feature = begin
