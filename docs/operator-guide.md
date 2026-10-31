@@ -612,29 +612,27 @@ kamal app exec --interactive bash
 #### Freentonic source selection
 
 `bin/build-freentonic-image` (invoked by `.kamal/hooks/pre-deploy`)
-picks the source in this order:
+picks the source:
 
-1. `FREENTONIC_SRC=/path/to/checkout` — explicit local path. Synced
-   to the LXC with `rsync -a --delete`.
-2. `../freentonic` relative to the simplefreen repo — sibling
-   checkout. **This is the default** for the typical layout
-   (`~/code/simplefreen` + `~/code/freentonic`).
-3. `git clone $FREENTONIC_REPO@$FREENTONIC_REF` — fallback for fresh
-   hosts without a local checkout. Defaults to
-   `https://github.com/GermanDZ/freentonic.git` at `main`.
+1. **Default:** `git clone $FREENTONIC_REPO@$FREENTONIC_REF` on the
+   LXC (fetched and hard-reset on later deploys). Defaults to
+   `https://github.com/GermanDZ/freentonic.git` at `main`, so a deploy
+   ships what is merged — never whatever branch a local checkout is on.
+2. `FREENTONIC_SRC=/path/to/checkout` — opt-in local path, synced to
+   the LXC with `rsync -a --delete`. For iterating on freentonic
+   without pushing to GitHub.
 
-When building from a local checkout, the image is tagged
-`localhost:5000/freentonic:<short-sha>` (or `<short-sha>-dirty` if
-your working tree has uncommitted changes), plus `:latest`. The
-accessory always pulls `:latest`. No GitHub push is needed to
-redeploy — edit freentonic locally and `kamal deploy`.
+The image is tagged `localhost:5000/freentonic:<short-sha>` (from a
+local checkout, `<short-sha>-dirty` if its working tree has
+uncommitted changes), plus `:latest`. The accessory always pulls
+`:latest`.
 
 ```sh
-# Build from a different local checkout (e.g. a worktree on a branch)
-FREENTONIC_SRC=~/code/freentonic-feature-x kamal deploy
+# Build a branch or tag from GitHub
+FREENTONIC_REF=some-branch kamal deploy
 
-# Force the GitHub-clone path even when ../freentonic exists
-FREENTONIC_SRC= FREENTONIC_REF=some-branch kamal deploy
+# Build from a local checkout (e.g. a worktree on a branch)
+FREENTONIC_SRC=~/code/freentonic-feature-x kamal deploy
 ```
 
 Backups — `simplefreen_data` is the only volume whose loss is

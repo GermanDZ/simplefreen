@@ -2,21 +2,19 @@
 # Build the freentonic image directly on the LXC and push it to a
 # host-local Docker registry so Kamal's accessory pull picks it up.
 #
-# Source selection (first match wins):
-#   1. $FREENTONIC_SRC — explicit path to a local freentonic checkout
-#   2. ../freentonic relative to this repo — sibling checkout default
-#   3. git clone from $FREENTONIC_REPO at $FREENTONIC_REF — fallback
-#      for fresh hosts that don't have a local checkout
-#
-# This lets you iterate on freentonic locally without pushing to
-# GitHub on every redeploy — typical dev loop for a LAN-only setup.
+# Source selection:
+#   1. $FREENTONIC_SRC — explicit path to a local freentonic checkout,
+#      for iterating on freentonic without pushing to GitHub
+#   2. otherwise git clone/fetch $FREENTONIC_REPO at $FREENTONIC_REF —
+#      the default, so a deploy ships GitHub main and never whatever
+#      branch a local checkout happens to be on
 #
 # Why build on the LXC: the freentonic image is amd64, Chrome-heavy,
 # and not published to a public registry. Building remotely avoids a
 # slow buildx push over LAN.
 #
 # Env:
-#   FREENTONIC_SRC    local path to sync (default: ../freentonic if present)
+#   FREENTONIC_SRC    local path to sync instead of cloning (default: unset)
 #   FREENTONIC_REPO   git URL to clone if no local source (default: GitHub upstream)
 #   FREENTONIC_REF    branch/tag/sha to build when cloning (default: main)
 #   KAMAL_HOST        ssh target (required)
@@ -30,20 +28,14 @@
 
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-SIMPLEFREEN_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-
 REPO="${FREENTONIC_REPO:-https://github.com/GermanDZ/freentonic.git}"
 REF="${FREENTONIC_REF:-main}"
 HOST="${KAMAL_HOST:?set KAMAL_HOST to the deploy host}"
 SSH_USER="${KAMAL_SSH_USER:-root}"
 REGISTRY_PORT="${REGISTRY_PORT:-5000}"
 
-# Resolve source: explicit env > sibling checkout > git clone fallback.
+# Resolve source: explicit local checkout, else the git clone.
 LOCAL_SRC="${FREENTONIC_SRC:-}"
-if [ -z "$LOCAL_SRC" ] && [ -d "$SIMPLEFREEN_DIR/../freentonic" ]; then
-  LOCAL_SRC="$(cd "$SIMPLEFREEN_DIR/../freentonic" && pwd)"
-fi
 
 if [ -n "$LOCAL_SRC" ] && [ ! -d "$LOCAL_SRC" ]; then
   echo "[build-freentonic] FREENTONIC_SRC=$LOCAL_SRC not found" >&2
@@ -95,7 +87,7 @@ if [ -n "$LOCAL_SRC" ]; then
 
   # Determine a tag for the build. Prefer local git SHA + dirty marker;
   # fall back to a timestamp if the source isn't a git checkout.
-  if [ -d "$LOCAL_SRC/.git" ]; then
+  if [ -e "$LOCAL_SRC/.git" ]; then # a dir, or a file in a git worktree
     SHA=$(git -C "$LOCAL_SRC" rev-parse --short HEAD)
     if ! git -C "$LOCAL_SRC" diff --quiet HEAD 2>/dev/null; then
       SHA="${SHA}-dirty"

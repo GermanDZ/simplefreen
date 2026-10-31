@@ -22,6 +22,11 @@ work. Cross-repo: the Browse-mode admin button requires the
   `.kamal/hooks/` now **requires** `KAMAL_HOST` (no built-in default
   host). Export them from a gitignored `.envrc`. The `ops/reimport`
   Phase A full-canonical script likewise requires `SOURCES`.
+- **The freentonic image builds from GitHub `main` by default.**
+  `bin/build-freentonic-image` no longer picks up a sibling
+  `../freentonic` checkout, which shipped whatever branch it was on.
+  Set `FREENTONIC_SRC` to build from a local checkout, or
+  `FREENTONIC_REF` for another branch or tag.
 
 ### Security
 
